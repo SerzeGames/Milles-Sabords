@@ -1,0 +1,1374 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Mille Sabords</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:#06111a;
+    font-family:"Trebuchet MS","Segoe UI",system-ui,sans-serif;
+    -webkit-tap-highlight-color:transparent;overscroll-behavior:none;touch-action:none;
+    -webkit-user-select:none;user-select:none}
+  #game{display:block;width:100%;height:100%}
+  #sat,#sab{position:fixed;left:0;width:0;pointer-events:none}
+  #sat{top:0;height:env(safe-area-inset-top,0px)}
+  #sab{bottom:0;height:env(safe-area-inset-bottom,0px)}
+  #boot{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    color:#d9a441;background:#06111a;font:600 16px Georgia,serif;letter-spacing:.22em;text-transform:uppercase}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="sat"></div><div id="sab"></div>
+<div id="boot">Chargement…</div>
+<script>
+"use strict";
+/* =========================================================================
+   MILLE SABORDS — édition récente (Singe/Perroquet, Sorcière, Roi, Naufrage)
+   Canvas 2D, un seul fichier. Assets locaux dans ./images/
+   ========================================================================= */
+
+/* ------------------------------ CONFIG ---------------------------------- */
+const DIR = "images/";
+const SRC = { sheet: DIR+"spritesheet.png", dice: DIR+"dice.png", back: DIR+"BackCard.png" };
+
+const TARGET        = 6000;   // seuil qui déclenche le dernier tour
+const ROI_COIN      = 200;    // carte Roi : valeur d'une pièce d'or
+const BATAILLE_MALUS= true;   // échec d'une Bataille = on perd les points de la carte (false = simple tour à 0)
+const ILE_MIN       = 4;      // têtes de mort au 1er lancer pour l'Île
+const SCORE_MIN_0   = false;  // true = plancher à 0 / false = les scores peuvent passer dans le négatif
+                              // (la jauge reste graduée de 0 à TARGET : un score négatif la laisse vide)
+
+/* Découpe du spritesheet des cartes (3346x400, 13 cartes) */
+const CARD_X = [13,270,527,785,1041,1298,1555,1812,2069,2326,2583,2840,3097];
+const CARD_SY = 13, CARD_SW = 231, CARD_SH = 373;
+const BACK_S = {x:11,y:8,w:237,h:383};      // BackCard.png 258x400
+const DIE_S  = 70;                           // dice.png 420x70 -> 6 cases de 70
+
+/* Faces des dés, dans l'ordre de dice.png */
+const SKULL=0, DIAM=1, COIN=2, SABRE=3, PARROT=4, MONKEY=5;
+const F1 = ["tête de mort","diamant","pièce d'or","sabre","perroquet","singe"];
+const FN = ["têtes de mort","diamants","pièces d'or","sabres","perroquets","singes"];
+
+/* Cartes Pirate : l'index correspond à la position dans le spritesheet */
+const CARDS = [
+ {id:"pirate", n:"Pirate",              copies:4, t:"Tous les points marqués ce tour sont doublés."},
+ {id:"skull1", n:"1 tête de mort",      copies:3, t:"Vous commencez le tour avec une tête de mort."},
+ {id:"skull2", n:"2 têtes de mort",     copies:2, t:"Vous commencez le tour avec deux têtes de mort."},
+ {id:"diam",   n:"Diamant",             copies:4, t:"Un diamant gratuit s'ajoute au lancer : 100 pts et il compte dans les combinaisons."},
+ {id:"coin",   n:"Pièce d'or",          copies:4, t:"Une pièce d'or gratuite s'ajoute au lancer : 100 pts et elle compte dans les combinaisons."},
+ {id:"monkey", n:"Singe & Perroquet",   copies:4, t:"Singes et perroquets forment un seul et même symbole pour les combinaisons."},
+ {id:"witch",  n:"Sorcière",            copies:2, t:"Une fois dans le tour, vous pouvez relancer une tête de mort."},
+ {id:"chest",  n:"Coffre",              copies:4, t:"Les dés mis au coffre gardent leurs points, même si vous atteignez 3 têtes de mort."},
+ {id:"bat2",   n:"Bataille — 2 sabres", copies:2, t:"Réunissez au moins 2 sabres : +300 pts. Sinon vous perdez 300 pts.", need:2, bonus:300},
+ {id:"bat3",   n:"Bataille — 3 sabres", copies:2, t:"Réunissez au moins 3 sabres : +500 pts. Sinon vous perdez 500 pts.", need:3, bonus:500},
+ {id:"bat4",   n:"Bataille — 4 sabres", copies:2, t:"Réunissez au moins 4 sabres : +1000 pts. Sinon vous perdez 1000 pts.", need:4, bonus:1000},
+ {id:"king",   n:"Roi",                 copies:1, t:"Chaque pièce d'or vaut "+ROI_COIN+" pts au lieu de 100."},
+ {id:"storm",  n:"Naufrage",            copies:1, t:"2 lancers seulement, les têtes de mort ne vous éliminent pas. Après le 2e lancer, seuls diamants et pièces marquent, en double (symboles et combinaisons)."},
+];
+
+const COMBO = {3:100,4:200,5:500,6:1000,7:2000,8:4000};
+const AI_NAMES = ["Barbe-Rousse","Anne Bonny","Jambe-de-Bois"];
+
+/* Palette : nuit de haute mer, parchemin, laiton */
+const C = {
+  abyss:"#06111a", deep:"#0b2130", sea:"#113247", kelp:"#14484a",
+  parch:"#ead7ad", parch2:"#cdb384", ink:"#1b1409",
+  brass:"#d9a441", brass2:"#8d5f1c", rust:"#b8452f", bone:"#f4efe3",
+  jade:"#5ccfa6", shadow:"rgba(0,0,0,.45)"
+};
+/* Barre de progression : vert pour le joueur, rouge pour les adversaires */
+const BAR_ME = {hi:"#63d79d", lo:"#2c8a5e"};
+const BAR_AI = [{hi:"#e2543f",lo:"#9e2716"},{hi:"#e08a45",lo:"#9c541a"},{hi:"#d9486c",lo:"#98203e"}];
+
+const DISPLAY = 'Georgia,"Times New Roman",serif';
+const UI = '"Trebuchet MS","Segoe UI",system-ui,sans-serif';
+
+/* ------------------------------ OUTILS ---------------------------------- */
+const cv = document.getElementById("game");
+const ctx = cv.getContext("2d");
+let W=0, H=0, DPR=1, PORTRAIT=false;
+const rnd  = n => Math.random()*n;
+const ri   = n => Math.floor(Math.random()*n);
+const clamp= (v,a,b)=> v<a?a:(v>b?b:v);
+const lerp = (a,b,t)=> a+(b-a)*t;
+const now  = ()=> performance.now()/1000;
+
+function rr(x,y,w,h,r){
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+function text(s,x,y,size,{col=C.bone,font=UI,w="600",al="left",bl="middle",sh=0,ls=0}={}){
+  ctx.font = w+" "+size+"px "+font;
+  ctx.textAlign = ls?"left":al; ctx.textBaseline = bl;
+  if(ls){ // rendu lettre par lettre pour l'interlettrage
+    let tot=0; for(const ch of s) tot+=ctx.measureText(ch).width+ls;
+    tot-=ls; let cx = al==="center"? x-tot/2 : al==="right"? x-tot : x;
+    for(const ch of s){
+      if(sh){ctx.fillStyle="rgba(0,0,0,.55)";ctx.fillText(ch,cx+sh,y+sh);}
+      ctx.fillStyle=col; ctx.fillText(ch,cx,y); cx+=ctx.measureText(ch).width+ls;
+    }
+    return;
+  }
+  if(sh){ ctx.fillStyle="rgba(0,0,0,.55)"; ctx.fillText(s,x+sh,y+sh); }
+  ctx.fillStyle=col; ctx.fillText(s,x,y);
+}
+function wrap(s,size,maxw,font=UI,w="500"){
+  ctx.font = w+" "+size+"px "+font;
+  const out=[]; let line="";
+  for(const word of s.split(" ")){
+    const t = line?line+" "+word:word;
+    if(ctx.measureText(t).width>maxw && line){ out.push(line); line=word; } else line=t;
+  }
+  if(line) out.push(line);
+  return out;
+}
+function paraph(x,y,w,h,r=10){ // panneau parchemin
+  ctx.save();
+  ctx.fillStyle="rgba(0,0,0,.35)"; rr(x+3,y+4,w,h,r); ctx.fill();
+  const g=ctx.createLinearGradient(x,y,x,y+h);
+  g.addColorStop(0,C.parch); g.addColorStop(1,C.parch2);
+  ctx.fillStyle=g; rr(x,y,w,h,r); ctx.fill();
+  ctx.strokeStyle="rgba(60,40,15,.35)"; ctx.lineWidth=1.5; ctx.stroke();
+  ctx.restore();
+}
+function rope(x,y,w,h,r=14,col=C.brass,alpha=.75){ // liseré façon cordage
+  ctx.save(); ctx.globalAlpha=alpha; ctx.lineWidth=3; ctx.lineCap="round";
+  ctx.strokeStyle=col; ctx.setLineDash([11,9]); ctx.lineDashOffset=0;
+  rr(x,y,w,h,r); ctx.stroke();
+  ctx.strokeStyle="rgba(0,0,0,.35)"; ctx.lineDashOffset=10;
+  rr(x,y,w,h,r); ctx.stroke();
+  ctx.setLineDash([]); ctx.restore();
+}
+function zone(x,y,w,h,label,tint){
+  ctx.save();
+  ctx.fillStyle=tint||"rgba(6,20,30,.45)"; rr(x,y,w,h,14); ctx.fill();
+  ctx.strokeStyle="rgba(217,164,65,.22)"; ctx.lineWidth=1.5; ctx.stroke();
+  if(label) text(label.toUpperCase(), x+12, y+13, Math.max(9,S.u*0.62), {col:"rgba(234,215,173,.5)",w:"700",ls:1.6});
+  ctx.restore();
+}
+
+/* Audio minimal (aucun fichier son requis) */
+const AC = window.AudioContext||window.webkitAudioContext;
+let ac=null, muted=false;
+function beep(freq,dur,type="triangle",vol=.05,slide=0){
+  if(muted) return;
+  try{
+    if(!ac) ac=new AC();
+    if(ac.state==="suspended") ac.resume();
+    const o=ac.createOscillator(), g=ac.createGain();
+    o.type=type; o.frequency.value=freq;
+    if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(40,freq+slide), ac.currentTime+dur);
+    g.gain.value=vol; g.gain.exponentialRampToValueAtTime(.0001, ac.currentTime+dur);
+    o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime+dur+.02);
+  }catch(e){}
+}
+const SFX = {
+  roll:()=>{ for(let i=0;i<5;i++) setTimeout(()=>beep(180+rnd(260),.06,"square",.035),i*45); },
+  skull:()=>beep(150,.35,"sawtooth",.05,-90),
+  good:()=>{ beep(520,.12,"triangle",.05); setTimeout(()=>beep(780,.16,"triangle",.05),110); },
+  bank:()=>{ [523,659,784,1046].forEach((f,i)=>setTimeout(()=>beep(f,.14,"triangle",.045),i*80)); },
+  card:()=>beep(320,.1,"sine",.04,180),
+  click:()=>beep(420,.05,"square",.03)
+};
+
+/* ------------------------------ ASSETS ---------------------------------- */
+const IMG={}; let loaded=0;
+function loadAll(cb){
+  const keys=Object.keys(SRC);
+  keys.forEach(k=>{
+    const im=new Image();
+    im.onload = ()=>{ if(++loaded===keys.length) cb(); };
+    im.onerror= ()=>{ IMG[k]=null; if(++loaded===keys.length) cb(); };
+    im.src=SRC[k]; IMG[k]=im;
+  });
+}
+function drawCard(i,x,y,w,h,r){ // carte Pirate n°i, dessinée dans le rect donné
+  ctx.save();
+  ctx.fillStyle="rgba(0,0,0,.5)"; rr(x+3,y+5,w,h,r); ctx.fill();
+  rr(x,y,w,h,r); ctx.clip();
+  ctx.fillStyle="#0e0b06"; ctx.fillRect(x,y,w,h);
+  if(IMG.sheet && IMG.sheet.width) ctx.drawImage(IMG.sheet, CARD_X[i],CARD_SY,CARD_SW,CARD_SH, x,y,w,h);
+  ctx.restore();
+  ctx.save(); ctx.strokeStyle="rgba(217,164,65,.55)"; ctx.lineWidth=2; rr(x,y,w,h,r); ctx.stroke(); ctx.restore();
+}
+function drawBack(x,y,w,h,r){
+  ctx.save();
+  ctx.fillStyle="rgba(0,0,0,.5)"; rr(x+3,y+5,w,h,r); ctx.fill();
+  rr(x,y,w,h,r); ctx.clip();
+  ctx.fillStyle="#c9b184"; ctx.fillRect(x,y,w,h);
+  if(IMG.back && IMG.back.width) ctx.drawImage(IMG.back, BACK_S.x,BACK_S.y,BACK_S.w,BACK_S.h, x,y,w,h);
+  ctx.restore();
+  ctx.save(); ctx.strokeStyle="rgba(217,164,65,.45)"; ctx.lineWidth=2; rr(x,y,w,h,r); ctx.stroke(); ctx.restore();
+}
+function drawFace(f,cx,cy,s){
+  if(IMG.dice && IMG.dice.width) ctx.drawImage(IMG.dice, f*DIE_S,0,DIE_S,DIE_S, cx-s/2,cy-s/2,s,s);
+  else { ctx.fillStyle="#eee"; rr(cx-s/2,cy-s/2,s,s,s*.18); ctx.fill(); }
+}
+
+/* ------------------------------- ÉTAT ------------------------------------ */
+const S = {
+  phase:"menu",          // menu | rules | card | roll | choose | resolve | over
+  u:14,                  // unité typographique
+  players:[], cur:0, nAI:1,
+  deck:[], card:0, flip:{mode:null,t:0,dur:.55}, resolveUntil:0,
+  dice:[],               // {face,zone,sel,virtual,x,y,tx,ty,size,rot,sc,anim}
+  rolls:0, island:false, newSkulls:0, witchUsed:false,
+  lastRound:false, endAt:-1,
+  log:[], pop:[], banner:null,
+  aiAt:0, pendingAfterRoll:false, hover:null, t:0
+};
+
+function say(msg,col){ S.log.unshift({m:msg,c:col||C.parch}); if(S.log.length>22) S.log.pop(); }
+function P(){ return S.players[S.cur]; }
+function card(){ return CARDS[S.card]; }
+function tableDice(){ return S.dice.filter(d=>d.zone==="table"); }
+function realTable(){ return S.dice.filter(d=>d.zone==="table" && !d.virtual); }
+function chestDice(){ return S.dice.filter(d=>d.zone==="chest"); }
+function skullDice(){ return S.dice.filter(d=>d.zone==="skull"); }
+function realSkulls(){ return S.dice.filter(d=>d.zone==="skull" && !d.virtual); }
+function skulls(){ return skullDice().length; }
+function selCount(){ return S.dice.filter(d=>d.zone==="table" && !d.virtual && d.sel).length; }
+
+function newGame(nAI){
+  S.nAI = nAI;
+  S.players = [{name:"Vous", score:0, disp:0, ai:false}];
+  for(let i=0;i<nAI;i++) S.players.push({name:AI_NAMES[i], score:0, disp:0, ai:true});
+  S.deck=[]; S.log=[]; S.lastRound=false; S.endAt=-1; S.cur=S.players.length-1;
+  say("La partie commence. Premier à "+TARGET+" points déclenche le dernier tour.", C.brass);
+  nextTurn();
+}
+function buildDeck(){
+  S.deck=[];
+  CARDS.forEach((c,i)=>{ for(let k=0;k<c.copies;k++) S.deck.push(i); });
+  for(let i=S.deck.length-1;i>0;i--){ const j=ri(i+1); [S.deck[i],S.deck[j]]=[S.deck[j],S.deck[i]]; }
+}
+function nextTurn(){
+  if(S.lastRound && S.cur===S.endAt){ gameOver(); return; }
+  S.cur = (S.cur+1)%S.players.length;
+  if(S.lastRound && S.cur===S.endAt){ gameOver(); return; }
+  startTurn();
+}
+function startTurn(){
+  if(!S.deck.length) buildDeck();
+  S.card = S.deck.pop();
+  S.dice=[]; S.rolls=0; S.island=false; S.newSkulls=0; S.witchUsed=false;
+  S.banner=null; S.aiAt=0;
+
+  for(let i=0;i<8;i++) S.dice.push(mkDie(SABRE,"table"));
+  const c = card();
+  if(c.id==="skull1") addVirtual(SKULL,"skull",1);
+  if(c.id==="skull2") addVirtual(SKULL,"skull",2);
+  if(c.id==="diam")   addVirtual(DIAM,"table",1);
+  if(c.id==="coin")   addVirtual(COIN,"table",1);
+
+  S.phase="card"; S.flip={mode:"reveal",t:0,dur:.55}; SFX.card();
+  say((P().ai?P().name:"Vous")+" — carte "+c.n, P().ai?C.parch2:C.brass);
+}
+function mkDie(face,zone){
+  return {face, zone, sel:false, virtual:false, x:W/2, y:H/2, tx:W/2, ty:H/2,
+          size:40, rot:0, sc:1, anim:null, born:S.t};
+}
+function addVirtual(face,zone,n){
+  for(let i=0;i<n;i++){ const d=mkDie(face,zone); d.virtual=true; S.dice.push(d); }
+}
+
+/* ------------------------------ LANCERS ---------------------------------- */
+function rollDice(list){
+  if(!list.length) return;
+  S.rolls++;
+  S.phase="roll"; SFX.roll();
+  list.forEach((d,i)=>{
+    d.sel=false;
+    d.anim={t:0, dur:.5+rnd(.18), delay:i*.045, final:ri(6), flick:0};
+  });
+  S.pendingAfterRoll=true;
+}
+function afterRoll(){
+  const before = skulls();
+  let got=0;
+  realTable().forEach(d=>{ if(d.face===SKULL){ d.zone="skull"; got++; } });
+  S.newSkulls=got;
+  if(got){ SFX.skull(); }
+  const c=card(), sk=skulls();
+
+  // Île de la Tête-de-Mort : 4+ crânes au premier lancer
+  if(S.rolls===1 && c.id!=="storm" && sk>=ILE_MIN){
+    S.island=true;
+    say("Île de la Tête-de-Mort ! "+sk+" têtes de mort.", C.rust);
+  }
+  if(S.island){
+    if(got===0 || realTable().length===0){ resolve(); return; }
+    tableDice().forEach(d=>{ if(!d.virtual) d.sel=true; });
+    S.phase="choose"; if(P().ai) S.aiAt=S.t+.9;
+    return;
+  }
+  if(c.id==="storm"){
+    if(S.rolls>=2 || realTable().length<2){ resolve(); return; }
+    S.phase="choose";
+    if(P().ai) S.aiAt=S.t+.9;
+    else preselect();
+    return;
+  }
+  if(sk>=3){
+    if(c.id==="witch" && !S.witchUsed && realSkulls().length){
+      S.phase="choose"; say("3 têtes de mort… la Sorcière peut encore sauver le tour.", C.rust);
+      if(P().ai) S.aiAt=S.t+.8;
+      return;
+    }
+    resolve(); return;
+  }
+  if(stuck()){ resolve(); return; }
+  S.phase="choose";
+  if(P().ai) S.aiAt=S.t+1.0;
+  else preselect();
+  if(before<sk && sk===2 && !P().ai) S.banner={txt:"Plus qu'une tête de mort avant le naufrage", t:S.t+2.2, col:C.rust};
+}
+/* Aucune relance possible et rien à encaisser : le tour s'arrête tout seul */
+function stuck(){
+  if(realTable().length>=2) return false;
+  const sc=turnScore();
+  return sc.total<=0 || sc.battleFail;
+}
+function useWitch(){
+  const d = realSkulls()[0];
+  if(!d) return;
+  S.witchUsed=true; d.zone="table";
+  say("La Sorcière relance une tête de mort.", C.jade);
+  S.phase="roll";
+  d.anim={t:0,dur:.55,delay:0,final:ri(6),flick:0};  // ne compte pas comme un lancer
+  S.pendingAfterRoll=true; SFX.roll();
+}
+
+/* ------------------------------ SCORE ------------------------------------ */
+function comboPts(n){ return n<3?0:(COMBO[Math.min(n,8)]||4000); }
+function keyOf(f,c){ return (c.id==="monkey" && (f===PARROT||f===MONKEY)) ? "mp" : f; }
+function labelOf(k,n){ return k==="mp" ? n+" singes/perroquets" : n+" "+FN[k]; }
+
+/* Score de la position courante (comme si on encaissait maintenant) */
+function turnScore(){
+  const c=card();
+  const lines=[]; let total=0;
+
+  if(S.island){
+    const n=skulls();
+    return {total:0, lines:[{l:"Île de la Tête-de-Mort — "+n+" têtes de mort", p:0}], island:n, swords:0};
+  }
+  const lost = skulls()>=3 && c.id!=="storm";
+  let src;
+  if(lost) src = (c.id==="chest") ? chestDice() : [];
+  else     src = S.dice.filter(d=>d.zone==="table"||d.zone==="chest");
+
+  let faces = src.map(d=>d.face);
+  if(c.id==="storm") faces = faces.filter(f=>f===DIAM||f===COIN);
+
+  const groups=new Map();
+  faces.forEach(f=>{ const k=keyOf(f,c); groups.set(k,(groups.get(k)||0)+1); });
+  const scoringKeys=new Set();
+  [...groups.entries()].sort((a,b)=>b[1]-a[1]).forEach(([k,n])=>{
+    const p=comboPts(n);
+    if(p>0){ total+=p; scoringKeys.add(k); lines.push({l:"Combinaison — "+labelOf(k,n), p}); }
+  });
+  const nd=faces.filter(f=>f===DIAM).length, nc=faces.filter(f=>f===COIN).length;
+  const cv=(c.id==="king")?ROI_COIN:100;
+  if(nd) { total+=nd*100; lines.push({l:nd+" "+(nd>1?"diamants":"diamant")+" × 100", p:nd*100}); }
+  if(nc) { total+=nc*cv;  lines.push({l:nc+" "+(nc>1?"pièces d'or":"pièce d'or")+" × "+cv+(c.id==="king"?" (Roi)":""), p:nc*cv}); }
+
+  // Coffre plein : les 8 dés réels marquent
+  if(!lost && c.id!=="storm"){
+    const reals=S.dice.filter(d=>!d.virtual && (d.zone==="table"||d.zone==="chest"));
+    const all = reals.length===8 && reals.every(d=> d.face===DIAM||d.face===COIN||scoringKeys.has(keyOf(d.face,c)));
+    if(all){ total+=500; lines.push({l:"Coffre plein", p:500}); }
+  }
+  if(c.id==="storm"){ total*=2; if(total) lines.push({l:"Naufrage — diamants et pièces doublés", p:0}); }
+
+  // Bataille
+  const swords = S.dice.filter(d=>(d.zone==="table"||d.zone==="chest") && d.face===SABRE).length;
+  let battleFail=false;
+  if(c.need){
+    const won = !lost && swords>=c.need;
+    if(won){ total+=c.bonus; lines.push({l:"Bataille remportée ("+swords+" sabres)", p:c.bonus}); }
+    else{
+      battleFail=true;
+      if(S.phase==="resolve"||S.phase==="over"){
+        total = BATAILLE_MALUS ? -c.bonus : 0;
+        lines.length=0; lines.push({l:"Bataille perdue — "+swords+"/"+c.need+" sabres", p:total});
+      }
+    }
+  }
+  if(lost && !c.need && !lines.length) lines.push({l:"3 têtes de mort — tour perdu", p:0});
+  if(c.id==="pirate" && total>0){ total*=2; lines.push({l:"Pirate — points doublés", p:0}); }
+  return {total, lines, island:0, swords, lost, battleFail};
+}
+
+function resolve(){
+  S.phase="resolve";
+  const p=P(), c=card(), r=turnScore();
+  const detail = r.lines.filter(l=>l.l).map(l=>l.l.replace("Combinaison — ","")).join(" · ");
+  if(S.island){
+    const n=skulls(), mult=(c.id==="pirate")?2:1, pen=n*100*mult;
+    S.players.forEach((q,i)=>{ if(i!==S.cur){ q.score-=pen; if(SCORE_MIN_0) q.score=Math.max(0,q.score); } });
+    SFX.skull();
+    say(p.name+" : île de la Tête-de-Mort, -"+pen+" pour les autres.", C.rust);
+    S.pop.push({txt:"ÎLE DE LA TÊTE-DE-MORT", sub:n+" têtes de mort · -"+pen+" pour chaque adversaire",
+                col:C.rust, t:S.t, life:2.1});
+  } else if(r.total<=0){
+    const trois = skulls()>=3 && c.id!=="storm";
+    const head = r.battleFail ? "BATAILLE PERDUE" : (trois ? "3 TÊTES DE MORT" : "AUCUN POINT");
+    let sub = "Tour perdu";
+    if(r.total<0){
+      p.score+=r.total; if(SCORE_MIN_0) p.score=Math.max(0,p.score);
+      sub = r.total+" points"+(trois?" · 3 têtes de mort":" · "+r.swords+"/"+c.need+" sabres");
+    }
+    SFX.skull();
+    say(p.name+" : "+head.toLowerCase()+(r.total<0?" ("+r.total+" pts, total "+p.score+")":"")+".", C.rust);
+    S.pop.push({txt:head, sub, col:C.rust, t:S.t, life:2.0});
+  } else {
+    p.score+=r.total;
+    SFX.bank();
+    say(p.name+" encaisse "+r.total+" pts (total "+p.score+").", C.jade);
+    if(detail) say(detail, "rgba(234,215,173,.55)");
+    S.pop.push({txt:"+"+r.total, sub:detail, col:C.jade, t:S.t, life:1.9});
+  }
+  if(!S.lastRound && p.score>=TARGET){
+    S.lastRound=true; S.endAt=S.cur;
+    say(p.name+" dépasse "+TARGET+" ! Dernier tour pour les autres.", C.brass);
+  }
+  S.flip={mode:"hide",t:0,dur:.55};        // la carte du tour se retourne face cachée
+  S.resolveUntil = S.t + (r.total>0?1.55:1.9);
+}
+function gameOver(){
+  S.phase="over";
+  const best=Math.max(...S.players.map(p=>p.score));
+  S.winners=S.players.filter(p=>p.score===best);
+  SFX.good();
+}
+
+/* Présélection : on propose les dés inutiles, sauf quand le risque devient réel */
+function preselect(){
+  if(skulls()>=2) return;                       // à 2 têtes de mort, au joueur de décider
+  const c=card();
+  const sw=S.dice.filter(d=>(d.zone==="table"||d.zone==="chest")&&d.face===SABRE).length;
+  const re=suggestReroll(!!(c.need && sw<c.need));
+  if(re.length>=2) re.forEach(d=>d.sel=true);
+}
+
+/* Dés « inutiles » à relancer : sert à l'IA et à la présélection du joueur */
+function suggestReroll(force){
+  const c=card(), dice=realTable();
+  const groups=new Map();
+  dice.forEach(d=>{ const k=keyOf(d.face,c); groups.set(k,(groups.get(k)||0)+1); });
+  const keep=d=>{
+    if(c.id==="storm") return d.face===DIAM||d.face===COIN;
+    if(d.face===DIAM||d.face===COIN) return true;
+    if(c.need && d.face===SABRE) return true;
+    return groups.get(keyOf(d.face,c))>=2;
+  };
+  const re=dice.filter(d=>!keep(d));
+  if(force && re.length<2){
+    const poids=d=>(c.need&&d.face===SABRE)?3:((d.face===DIAM||d.face===COIN)?2:0);
+    const extra=dice.filter(d=>re.indexOf(d)<0)
+      .sort((a,b)=>poids(a)-poids(b)
+                 || (groups.get(keyOf(a.face,c))-groups.get(keyOf(b.face,c))));
+    while(re.length<2 && extra.length) re.push(extra.shift());
+  }
+  return re;
+}
+
+/* ------------------------------- IA -------------------------------------- */
+/* L'IA énumère les façons sensées de relancer, puis simule la fin du tour des
+   centaines de fois avec les vraies règles (bataille, coffre, pirate, sorcière,
+   coffre plein) et garde le coup dont l'espérance est la meilleure.           */
+function binom(n,k){ let r=1; for(let i=0;i<k;i++) r=r*(n-i)/(i+1); return r; }
+function pAtLeast(n,k,p=1/6){ if(k<=0) return 1; let s=0; for(let i=k;i<=n;i++) s+=binom(n,i)*Math.pow(p,i)*Math.pow(1-p,n-i); return s; }
+const nowMs=()=> (typeof performance!=="undefined"&&performance.now)?performance.now():Date.now();
+
+/* Score final d'une position exprimée en comptes de faces (version rapide). */
+function fastScore(tab,chest,bonus,sk,cIdx){
+  const c=CARDS[cIdx], coinV=(c.id==="king")?ROI_COIN:100;
+  if(c.id==="storm"){
+    const d=tab[DIAM]+chest[DIAM]+bonus[DIAM], m=tab[COIN]+chest[COIN]+bonus[COIN];
+    return (comboPts(d)+comboPts(m)+d*100+m*coinV)*2;
+  }
+  const lost=sk>=3, g=[0,0,0,0,0,0];
+  if(lost){
+    if(c.need) return BATAILLE_MALUS?-c.bonus:0;
+    if(c.id!=="chest") return 0;
+    for(let f=1;f<6;f++) g[f]=chest[f];
+  } else for(let f=1;f<6;f++) g[f]=tab[f]+chest[f]+bonus[f];
+  const merge=(c.id==="monkey"), sco=[false,false,false,false,false,false];
+  let total=0;
+  if(merge){ const q=comboPts(g[PARROT]+g[MONKEY]); if(q>0){ total+=q; sco[PARROT]=sco[MONKEY]=true; } }
+  for(let f=1;f<6;f++){
+    if(merge&&(f===PARROT||f===MONKEY)) continue;
+    const q=comboPts(g[f]); if(q>0){ total+=q; sco[f]=true; }
+  }
+  total+=g[DIAM]*100+g[COIN]*coinV;
+  sco[DIAM]=sco[COIN]=true;
+  if(!lost){
+    let real=0, all=true;
+    for(let f=1;f<6;f++){ const n=tab[f]+chest[f]; real+=n; if(n>0&&!sco[f]) all=false; }
+    if(real===8&&all) total+=500;
+  }
+  if(c.need){
+    if(tab[SABRE]+chest[SABRE]>=c.need) total+=c.bonus;
+    else return BATAILLE_MALUS?-c.bonus:0;
+  }
+  if(c.id==="pirate"&&total>0) total*=2;
+  return total;
+}
+function aiState(){
+  const tab=[0,0,0,0,0,0], chest=[0,0,0,0,0,0], bonus=[0,0,0,0,0,0];
+  S.dice.forEach(d=>{
+    if(d.zone==="chest") chest[d.face]++;
+    else if(d.zone==="table") (d.virtual?bonus:tab)[d.face]++;
+  });
+  return {tab,chest,bonus,sk:skulls(),witch:card().id==="witch"&&!S.witchUsed,cIdx:S.card};
+}
+const cloneSt=s=>({tab:s.tab.slice(),chest:s.chest.slice(),bonus:s.bonus.slice(),sk:s.sk,witch:s.witch,cIdx:s.cIdx});
+function grpSize(st,f){
+  const c=CARDS[st.cIdx];
+  if(c.id==="monkey"&&(f===PARROT||f===MONKEY))
+    return st.tab[PARROT]+st.tab[MONKEY]+st.chest[PARROT]+st.chest[MONKEY];
+  return st.tab[f]+st.chest[f];
+}
+/* Faces qu'il serait absurde de relancer */
+function lockedFace(st,f){
+  const c=CARDS[st.cIdx];
+  if(f===DIAM||f===COIN) return true;        // 100 points déjà acquis
+  if(c.need&&f===SABRE)  return true;        // bataille : chaque sabre compte
+  return grpSize(st,f)>=3;                   // combinaison déjà faite
+}
+/* Priorité de sacrifice quand la règle impose de relancer 2 dés */
+function sacPri(st,f){
+  const c=CARDS[st.cIdx];
+  if(!lockedFace(st,f)) return 0;
+  if(c.need&&f===SABRE) return 3;
+  if(f===DIAM||f===COIN) return 2;
+  return 1;
+}
+/* Plan de relance « raisonnable » utilisé pendant les simulations */
+function junkPlan(st){
+  const k=[0,0,0,0,0,0]; let n=0;
+  for(let f=1;f<6;f++){
+    if(!st.tab[f]||lockedFace(st,f)||grpSize(st,f)>=2) continue;
+    k[f]=st.tab[f]; n+=st.tab[f];
+  }
+  if(n<2){
+    const ordre=[];
+    for(let f=1;f<6;f++) if(st.tab[f]&&!k[f]) ordre.push(f);
+    ordre.sort((a,b)=>sacPri(st,a)-sacPri(st,b)||grpSize(st,a)-grpSize(st,b));
+    for(const f of ordre){ if(n>=2) break; k[f]=st.tab[f]; n+=st.tab[f]; }
+  }
+  return {k,n};
+}
+/* Déroulé d'une fin de tour jusqu'à l'arrêt, renvoie les points marqués */
+function rollout(st){
+  const c=CARDS[st.cIdx];
+  if(c.id!=="storm") for(let step=0;step<14;step++){
+    if(st.sk>=3){
+      if(st.witch){ st.witch=false; st.sk--; const f=ri(6); if(f===SKULL) st.sk++; else st.tab[f]++; continue; }
+      break;
+    }
+    const cur=fastScore(st.tab,st.chest,st.bonus,st.sk,st.cIdx);
+    const pl=junkPlan(st);
+    if(pl.n<2) break;
+    const risque=pAtLeast(pl.n,3-st.sk);
+    const bataille=c.need&&(st.tab[SABRE]+st.chest[SABRE])<c.need;
+    if(!(bataille||cur<=0||risque*Math.max(cur,150)<(1-risque)*pl.n*72)) break;
+    for(let f=1;f<6;f++) st.tab[f]-=pl.k[f];
+    for(let j=0;j<pl.n;j++){ const f=ri(6); if(f===SKULL) st.sk++; else st.tab[f]++; }
+  }
+  return fastScore(st.tab,st.chest,st.bonus,st.sk,st.cIdx);
+}
+/* Des points vers une valeur d'usage : fin de partie, course au seuil... */
+function aiUtility(pts){
+  const me=S.players[S.cur];
+  let best=-1e9;
+  S.players.forEach((q,i)=>{ if(i!==S.cur&&q.score>best) best=q.score; });
+  const fin=me.score+pts;
+  if(S.lastRound) return fin>best ? 1000+Math.min(fin-best,800)*.02 : (fin-best)*.02;
+  let u=pts;
+  if(fin>=TARGET) u+=650;                              // déclencher le dernier tour
+  else if(best>=TARGET*.72) u+=Math.max(0,pts)*.22;    // course : viser plus gros
+  return u;
+}
+/* Toutes les relances envisageables : chaque face libre est gardée ou relancée */
+function aiCands(st){
+  const libres=[];
+  for(let f=1;f<6;f++) if(st.tab[f]&&!lockedFace(st,f)) libres.push(f);
+  const out=[{k:[0,0,0,0,0,0],n:0}];                   // s'arrêter
+  for(let m=1;m<(1<<libres.length);m++){
+    const k=[0,0,0,0,0,0]; let n=0;
+    libres.forEach((f,i)=>{ if(m&(1<<i)){ k[f]=st.tab[f]; n+=st.tab[f]; } });
+    if(n>=2) out.push({k,n});
+  }
+  if(out.length===1){ const pl=junkPlan(st); if(pl.n>=2) out.push(pl); }
+  return out;
+}
+function applyPlan(st,o){
+  const s2=cloneSt(st);
+  if(o.chest) for(let f=1;f<6;f++){ const g=s2.tab[f]-o.cd.k[f]; s2.chest[f]+=g; s2.tab[f]-=g; }
+  for(let f=1;f<6;f++) s2.tab[f]-=o.cd.k[f];
+  return s2;
+}
+function aiBest(st){
+  const c=CARDS[st.cIdx], t0=nowMs(), liste=[];
+  aiCands(st).forEach(cd=>{
+    liste.push({cd,chest:false});
+    if(c.id==="chest"){
+      let garde=0; for(let f=1;f<6;f++) garde+=st.tab[f]-cd.k[f];
+      if(garde>0) liste.push({cd,chest:true});
+    }
+  });
+  const evalue=(o,N)=>{
+    if(o.cd.n===0){
+      const s2=applyPlan(st,o);
+      return aiUtility(fastScore(s2.tab,s2.chest,s2.bonus,s2.sk,s2.cIdx));
+    }
+    let somme=0;
+    for(let i=0;i<N;i++){
+      const s2=applyPlan(st,o);
+      for(let j=0;j<o.cd.n;j++){ const f=ri(6); if(f===SKULL) s2.sk++; else s2.tab[f]++; }
+      somme+=aiUtility(rollout(s2));
+    }
+    return somme/N;
+  };
+  liste.forEach(o=>{ o.u=evalue(o,40); });
+  liste.sort((a,b)=>b.u-a.u);
+  const tete=liste.slice(0,5);
+  tete.forEach(o=>{ if(nowMs()-t0<70) o.u=o.u*.25+evalue(o,300)*.75; });
+  tete.sort((a,b)=>b.u-a.u);
+  return tete[0];
+}
+/* Traduit un plan (comptes par face) en dés réels de la table */
+function planDice(k,garder){
+  const out=[];
+  for(let f=1;f<6;f++){
+    const dés=realTable().filter(d=>d.face===f);
+    (garder?dés.slice(k[f]):dés.slice(0,k[f])).forEach(d=>out.push(d));
+  }
+  return out;
+}
+
+function aiAct(){
+  const c=card(), p=P();
+  if(S.phase!=="choose") return;
+
+  // 3 crânes : la Sorcière est le seul recours
+  if(skulls()>=3 && c.id==="witch" && !S.witchUsed){ useWitch(); return; }
+  if(S.island){ tableDice().forEach(d=>{if(!d.virtual)d.sel=true;}); rollDice(realTable()); return; }
+
+  // Naufrage : un seul lancer restant, seuls diamants et pièces marqueront
+  if(c.id==="storm"){
+    const re=realTable().filter(d=>d.face!==DIAM&&d.face!==COIN);
+    if(re.length>=2){ re.forEach(d=>d.sel=true); rollDice(re); } else resolve();
+    return;
+  }
+
+  const st=aiState(), best=aiBest(st);
+  if(!best){ resolve(); return; }
+  if(best.chest){
+    const garder=planDice(best.cd.k,true);
+    if(garder.length){
+      garder.forEach(d=>{ d.zone="chest"; d.sel=false; });
+      say(p.name+" met "+garder.length+" dé"+(garder.length>1?"s":"")+" au coffre.", C.parch2);
+      S.aiAt=S.t+.6; return;
+    }
+  }
+  if(best.cd.n===0){ resolve(); return; }
+  const re=planDice(best.cd.k,false);
+  if(re.length<2){ resolve(); return; }
+  re.forEach(d=>d.sel=true);
+  rollDice(re);
+}
+
+/* ------------------------------ LAYOUT ----------------------------------- */
+const L={};
+function layout(){
+  PORTRAIT = H > W*1.02;
+  L.compact = Math.min(W,H) < 480;          // téléphone : typo et boutons plus généreux
+  L.short   = H < 430;                      // téléphone couché : hauteur très contrainte
+  const u = clamp(Math.min(W,H)/(PORTRAIT?21:22), 10, 26);
+  S.u=u;
+  const pad=Math.round(u*(L.compact?.6:.8));
+  const np=S.players.length;
+  if(np){
+    const rowH=clamp(Math.min(H*(L.short?.046:.036),u*1.3),L.short?12:14,30);
+    const barH=rowH*np;
+    L.top={x:0,y:0,w:W,h:SAFE.t+clamp(barH+u*(L.short?1.2:2.2),44,H*.30)};
+    L.bar={x:pad,y:L.top.h-barH-u*.5,w:W-pad*2,h:barH,row:rowH};
+    L.titleY=(SAFE.t+L.bar.y)/2;
+  }else{
+    L.top={x:0,y:0,w:W,h:SAFE.t+clamp(H*.085,42,72)}; L.bar=null; L.titleY=L.top.h/2;
+  }
+  L.btnList=buttons();
+  const rows=1+Math.max(0,...L.btnList.map(b=>b.row||0));
+  const gap=Math.max(6,u*.4);
+  const btnH=clamp(H*(PORTRAIT?.084:(L.short?.14:.10)),L.compact?46:40,72);
+  const bh=btnH*rows+gap*(rows-1);
+  L.btn={x:pad,y:H-bh-pad-SAFE.b,w:W-pad*2,h:bh};
+
+  const bodyY=L.top.h+pad*.6, bodyH=L.btn.y-pad*.6-bodyY;
+
+  if(!PORTRAIT){
+    const lw=clamp(W*(L.short?.165:.20),110,255);
+    const rw=L.short?0:clamp(W*.21,150,290);        // journal masqué sur écran bas
+    L.card={x:pad,y:bodyY,w:lw,h:bodyH};
+    L.side={x:W-rw-pad,y:bodyY,w:rw,h:bodyH};
+    const mx=lw+pad*2, mr=W-pad-(rw?rw+pad:0);
+    L.mid ={x:mx,y:bodyY,w:mr-mx,h:bodyH};
+  }else{
+    const ch=clamp(bodyH*(L.compact?.26:.30),Math.min(110,bodyH*.20),260);
+    const sh=clamp(bodyH*(L.compact?.10:.13),Math.min(L.compact?34:44,bodyH*.07),80);
+    L.card={x:pad,y:bodyY,w:W-pad*2,h:ch};
+    L.side={x:pad,y:bodyY+ch+pad*.5,w:W-pad*2,h:sh};
+    L.mid ={x:pad,y:L.side.y+sh+pad*.5,w:W-pad*2,h:bodyH-ch-sh-pad};
+  }
+  // zones du plateau
+  const m=L.mid, hh=m.h;
+  const headH=clamp(hh*.13,Math.min(L.short?26:30,hh*.11),58);
+  const useChest=S.phase!=="menu" && S.phase!=="over" && card() && card().id==="chest";
+  const coveH=clamp(hh*.19,Math.min(L.short?34:52,hh*.16),110);
+  const chestH=useChest?coveH:0;
+  L.head ={x:m.x,y:m.y,w:m.w,h:headH};
+  L.table={x:m.x,y:m.y+headH+4,w:m.w,h:hh-headH-coveH-chestH-(useChest?16:10)};
+  L.cove ={x:m.x,y:L.table.y+L.table.h+6,w:useChest?m.w*.5-4:m.w,h:coveH};
+  L.chest={x:m.x+m.w*.5+4,y:L.cove.y,w:m.w*.5-4,h:chestH};
+  L.useChest=useChest;
+}
+function slotPos(rect,i,count,size,rows){
+  const cols=Math.ceil(count/rows);
+  const gapx=Math.min(size*.22, (rect.w-cols*size)/(cols+1));
+  const totw=cols*size+(cols-1)*gapx;
+  const r=Math.floor(i/cols), cidx=i%cols;
+  const inRow = Math.min(cols, count-r*cols);
+  const rw = inRow*size+(inRow-1)*gapx;
+  const x=rect.x+(rect.w-rw)/2+cidx*(size+gapx)+size/2;
+  const gapy=Math.min(size*.18,(rect.h-rows*size)/(rows+1));
+  const toth=rows*size+(rows-1)*gapy;
+  const y=rect.y+(rect.h-toth)/2+r*(size+gapy)+size/2;
+  return {x,y};
+}
+function placeDice(){
+  const tb=S.dice.filter(d=>d.zone==="table");
+  // on essaie 1 ou 2 rangées et on garde celle qui donne les plus gros dés
+  let rows=1, size=0;
+  for(const r of [1,2]){
+    const cols=Math.ceil(tb.length/r);
+    const sz=Math.min(L.table.w/(cols+.6), L.table.h/(r+.5));
+    if(sz>size){ size=sz; rows=r; }
+  }
+  size=clamp(size,22,86);
+  tb.forEach((d,i)=>{ const p=slotPos(L.table,i,tb.length,size,rows); d.tx=p.x; d.ty=p.y; d.size=size; });
+
+  const sk=skullDice(), ss=clamp(Math.min(L.cove.w/(sk.length+1.2), L.cove.h*.62), 18, size*.8);
+  sk.forEach((d,i)=>{ const p=slotPos({x:L.cove.x,y:L.cove.y+L.cove.h*.12,w:L.cove.w,h:L.cove.h*.88},i,sk.length,ss,1); d.tx=p.x; d.ty=p.y; d.size=ss; });
+
+  if(L.useChest){
+    const ch=chestDice(), cs=clamp(Math.min(L.chest.w/(ch.length+1.2), L.chest.h*.62), 18, size*.8);
+    ch.forEach((d,i)=>{ const p=slotPos({x:L.chest.x,y:L.chest.y+L.chest.h*.12,w:L.chest.w,h:L.chest.h*.88},i,ch.length,cs,1); d.tx=p.x; d.ty=p.y; d.size=cs; });
+  } else chestDice().forEach(d=>{ d.zone="table"; });
+}
+
+/* ------------------------------ BOUTONS ---------------------------------- */
+function isHuman(){ const p=S.players[S.cur]; return p && !p.ai; }
+function buttons(){
+  const b=[];
+  if(S.phase==="menu"){
+    b.push({id:"play",  l:"Nouvelle partie", k:"gold", on:true, row:0});
+    b.push({id:"rules", l:"Règles", k:"ghost", on:true, row:0});
+    b.push({id:"ai1",   l:"1 adversaire",  k:S.nAI===1?"sel":"ghost", on:true, row:1});
+    b.push({id:"ai2",   l:"2 adversaires", k:S.nAI===2?"sel":"ghost", on:true, row:1});
+    b.push({id:"ai3",   l:"3 adversaires", k:S.nAI===3?"sel":"ghost", on:true, row:1});
+    return b;
+  }
+  if(S.phase==="rules"){ b.push({id:"back",l:"Retour",k:"gold",on:true}); return b; }
+  if(S.phase==="over"){ b.push({id:"menu",l:"Rejouer",k:"gold",on:true}); return b; }
+  if(S.phase==="card"){
+    if(isHuman()) b.push({id:"first",l:L.compact?"Lancer les dés":"Lancer les 8 dés",k:"gold",on:S.flip.mode===null});
+    return b;
+  }
+  if(S.phase==="resolve") return b;
+  if(S.phase==="choose" && isHuman()){
+    const c=card(), sel=selCount(), sk=skulls(), sc=turnScore();
+    if(sk>=3 && c.id==="witch" && !S.witchUsed){
+      b.push({id:"witch",l:L.compact?"Sorcière : relancer un crâne":"Sorcière : relancer une tête de mort",k:"gold",on:true});
+      return b;
+    }
+    if(S.island){ b.push({id:"roll",l:"Relancer les dés",k:"gold",on:true}); return b; }
+    const canRoll=realTable().length>=2;
+    b.push({id:"roll", l:sel>=2?(L.compact?"Relancer ("+sel+")":"Relancer "+sel+" dés"):"Relancer", k:"gold", on:sel>=2&&canRoll});
+    if(!(c.id==="storm"&&S.rolls<2))
+      b.push({id:"bank", l:sc.battleFail?(L.compact?c.need+" sabres requis":"Il faut "+c.need+" sabres (−"+c.bonus+")")
+                                        :(L.compact?"Encaisser "+sc.total:"Encaisser "+sc.total+" pts"),
+              k:"green", on:sc.total>0 && !sc.battleFail});
+    b.push({id:"all", l:sel===realTable().length?"Aucun":"Tout", k:"ghost", on:canRoll});
+    if(c.id==="chest") b.push({id:"tochest", l:"Au coffre"+(sel?" ("+sel+")":""), k:"ghost", on:sel>=1});
+    if(c.id==="witch" && !S.witchUsed && realSkulls().length) b.push({id:"witch",l:"Sorcière",k:"ghost",on:true});
+    if(PORTRAIT && b.length>3) b.forEach(x=>{ if(x.k==="ghost") x.row=1; });
+    return b;
+  }
+  return b;
+}
+function btnRects(list){
+  const r=L.btn; if(!list || !list.length) return [];
+  const gap=Math.max(6,S.u*.4);
+  const rows=1+Math.max(0,...list.map(b=>b.row||0));
+  const rh=(r.h-gap*(rows-1))/rows;
+  const out=[];
+  for(let ro=0;ro<rows;ro++){
+    const line=list.filter(b=>(b.row||0)===ro);
+    if(!line.length) continue;
+    const weights=line.map(x=>x.k==="ghost"?.7:1);
+    const tot=weights.reduce((a,b)=>a+b,0);
+    const avail=r.w-gap*(line.length-1);
+    let x=r.x;
+    line.forEach((b,i)=>{ const w=avail*weights[i]/tot;
+      out.push({...b,x,y:r.y+ro*(rh+gap),w,h:rh}); x+=w+gap; });
+  }
+  return out;
+}
+function drawBtn(b){
+  const hov=S.hover===b.id;
+  const dis=!b.on;
+  let fill="rgba(12,32,44,.9)", stroke="rgba(217,164,65,.45)", col=C.parch;
+  if(b.k==="gold"){ fill=hov?"#e7b355":C.brass; col="#20160a"; stroke="rgba(255,225,160,.7)"; }
+  if(b.k==="green"){ fill=hov?"#6ee0b6":"#3ea886"; col="#08251c"; stroke="rgba(140,255,215,.5)"; }
+  if(b.k==="sel"){ fill="rgba(217,164,65,.28)"; stroke=C.brass; col=C.brass; }
+  ctx.save();
+  ctx.globalAlpha = dis?.35:1;
+  ctx.fillStyle="rgba(0,0,0,.4)"; rr(b.x+2,b.y+3,b.w,b.h,10); ctx.fill();
+  ctx.fillStyle=fill; rr(b.x,b.y,b.w,b.h,10); ctx.fill();
+  ctx.strokeStyle=stroke; ctx.lineWidth=1.6; ctx.stroke();
+  const fs=clamp(Math.min(b.h*.36, b.w/(b.l.length*.52)), 9, S.u*1.05);
+  text(b.l,b.x+b.w/2,b.y+b.h/2,fs,{col,al:"center",w:"700",font:UI});
+  ctx.restore();
+}
+
+/* ------------------------------ RENDU ------------------------------------ */
+function bg(){
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,"#04101a"); g.addColorStop(.55,C.deep); g.addColorStop(1,"#071a22");
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  // houle discrète
+  ctx.save(); ctx.globalAlpha=.05; ctx.strokeStyle=C.jade; ctx.lineWidth=1;
+  for(let i=0;i<6;i++){
+    const y=H*(.2+i*.13)+Math.sin(S.t*.4+i)*6;
+    ctx.beginPath();
+    for(let x=0;x<=W;x+=26) ctx.lineTo(x, y+Math.sin(x/120+S.t*.5+i)*4);
+    ctx.stroke();
+  }
+  ctx.restore();
+  const v=ctx.createRadialGradient(W/2,H*.45,Math.min(W,H)*.25,W/2,H*.5,Math.max(W,H)*.75);
+  v.addColorStop(0,"rgba(0,0,0,0)"); v.addColorStop(1,"rgba(0,0,0,.6)");
+  ctx.fillStyle=v; ctx.fillRect(0,0,W,H);
+}
+function compass(cx,cy,r){ // rose des vents gravée derrière les dés
+  ctx.save(); ctx.translate(cx,cy); ctx.globalAlpha=.07; ctx.strokeStyle=C.brass; ctx.lineWidth=1.2;
+  ctx.beginPath(); ctx.arc(0,0,r,0,7); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0,0,r*.72,0,7); ctx.stroke();
+  for(let i=0;i<8;i++){
+    const a=i*Math.PI/4, L1=(i%2?r*.55:r*.95), w=(i%2?r*.06:r*.11);
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a)*L1,Math.sin(a)*L1);
+    ctx.lineTo(Math.cos(a+Math.PI/2)*w,Math.sin(a+Math.PI/2)*w);
+    ctx.lineTo(Math.cos(a-Math.PI/2)*w,Math.sin(a-Math.PI/2)*w);
+    ctx.closePath(); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawTop(){
+  const r=L.top;
+  ctx.save();
+  ctx.fillStyle="rgba(4,14,22,.82)"; ctx.fillRect(0,0,W,r.h);
+  ctx.strokeStyle="rgba(217,164,65,.28)"; ctx.beginPath(); ctx.moveTo(0,r.h); ctx.lineTo(W,r.h); ctx.stroke();
+  ctx.restore();
+  const dispo = L.bar ? L.bar.y-SAFE.t : r.h;
+  const ts = clamp(Math.min(dispo*.52,L.compact?15:20),9,20);
+  text("MILLE SABORDS", S.u*.7, L.titleY, ts, {col:C.brass,font:DISPLAY,w:"700",ls:ts*.14});
+  if(L.bar) drawProgress();
+}
+/* Barre de progression vers l'objectif, une bande par joueur */
+function drawProgress(){
+  const r=L.bar, n=S.players.length, row=r.row;
+  const cap=clamp(S.u*.6,8,12);
+  text(L.compact?"OBJECTIF "+TARGET:"OBJECTIF "+TARGET+" POINTS", r.x+r.w, L.titleY, cap,
+       {col:"rgba(234,215,173,.45)",al:"right",w:"700",ls:1.2});
+  ctx.save();
+  ctx.fillStyle="rgba(0,0,0,.4)"; rr(r.x,r.y,r.w,r.h,5); ctx.fill();
+  rr(r.x,r.y,r.w,r.h,5); ctx.clip();
+  // graduations tous les 1000 points
+  ctx.strokeStyle="rgba(234,215,173,.14)"; ctx.lineWidth=1;
+  for(let v=1000;v<TARGET;v+=1000){
+    const gx=Math.round(r.x+r.w*v/TARGET)+.5;
+    ctx.beginPath(); ctx.moveTo(gx,r.y); ctx.lineTo(gx,r.y+r.h); ctx.stroke();
+  }
+  S.players.forEach((p,i)=>{
+    const y=r.y+i*row, col=(p.ai?BAR_AI[Math.max(0,i-1)%BAR_AI.length]:BAR_ME)||BAR_ME;
+    const w=r.w*clamp(p.disp/TARGET,0,1);      // un score négatif laisse la bande vide
+    const g=ctx.createLinearGradient(0,y,0,y+row);
+    g.addColorStop(0,col.hi); g.addColorStop(1,col.lo);
+    ctx.fillStyle=g; ctx.fillRect(r.x,y+1,w,row-2);
+    if(p.score>=TARGET){ ctx.fillStyle="rgba(217,164,65,.85)"; ctx.fillRect(r.x+r.w-3,y+1,3,row-2); }
+    // séparateurs + surlignage du joueur actif
+    ctx.strokeStyle="rgba(0,0,0,.5)"; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(r.x,y+row-.5); ctx.lineTo(r.x+r.w,y+row-.5); ctx.stroke();
+    const act=i===S.cur && S.phase!=="over";
+    if(act){ ctx.strokeStyle="rgba(255,240,200,.85)"; ctx.lineWidth=1.6;
+      ctx.strokeRect(r.x+.8,y+1,r.w-1.6,row-2); }
+    const fs=clamp(row*.6,8,14);
+    text(p.name, r.x+6, y+row/2, fs, {col:act?"#fff":"rgba(255,255,255,.82)",w:"700",sh:1});
+    text(String(Math.round(p.disp)), r.x+r.w-6, y+row/2, fs,
+         {col:act?"#fff":"rgba(255,255,255,.82)",al:"right",w:"700",sh:1});
+  });
+  ctx.restore();
+  ctx.save(); ctx.strokeStyle="rgba(217,164,65,.35)"; ctx.lineWidth=1.4; rr(r.x,r.y,r.w,r.h,5); ctx.stroke(); ctx.restore();
+}
+function drawCardPanel(){
+  const r=L.card;
+  const c=card();
+  const ta=cardTextAlpha();
+  if(PORTRAIT){
+    const ch=r.h, cwid=ch*(CARD_SW/CARD_SH);
+    const scale=Math.min(1,(r.w*.42)/cwid);
+    const cw=cwid*scale, chh=ch*scale;
+    drawCardAnim(r.x, r.y+(r.h-chh)/2, cw, chh);
+    const tx=r.x+cw+S.u*.8, tw=r.w-cw-S.u*.8;
+    ctx.save(); ctx.globalAlpha=ta;
+    text(c.n.toUpperCase(), tx, r.y+S.u*1.1, clamp(S.u*.95,11,19), {col:C.brass,font:DISPLAY,w:"700",ls:.8});
+    wrap(c.t, clamp(S.u*.78,10,15), tw).forEach((ln,i)=>
+      text(ln, tx, r.y+S.u*2.6+i*S.u*1.15, clamp(S.u*.78,10,15), {col:"rgba(234,215,173,.86)",w:"500"}));
+    ctx.restore();
+    return;
+  }
+  const cw=r.w, ch=Math.min(cw/(CARD_SW/CARD_SH), r.h*.58);
+  const w2=ch*(CARD_SW/CARD_SH);
+  drawCardAnim(r.x+(r.w-w2)/2, r.y, w2, ch);
+  let y=r.y+ch+S.u*1.1;
+  ctx.save(); ctx.globalAlpha=ta;
+  text(c.n.toUpperCase(), r.x+r.w/2, y, clamp(S.u*.9,10,17), {col:C.brass,al:"center",font:DISPLAY,w:"700",ls:.6});
+  y+=S.u*1.5;
+  const tl=wrap(c.t, clamp(S.u*.72,9,14), r.w);
+  tl.forEach((ln,i)=>
+    text(ln, r.x+r.w/2, y+i*S.u*1.05, clamp(S.u*.72,9,14), {col:"rgba(234,215,173,.82)",al:"center",w:"500"}));
+  // aide-mémoire, si la place le permet
+  let ay=y+tl.length*S.u*1.05+S.u*1.4;
+  const fs=clamp(S.u*.66,8,12), rows=[["3 identiques","100"],["4","200"],["5","500"],["6","1000"],
+        ["7","2000"],["8","4000"],["Diamant / pièce","100"],["Coffre plein","500"]];
+  if(!L.compact && ay+rows.length*fs*1.5+fs*2 < r.y+r.h){
+    text("COMBINAISONS", r.x, ay, fs*.92, {col:"rgba(234,215,173,.45)",w:"700",ls:1.4});
+    ay+=fs*1.8;
+    ctx.save(); ctx.globalAlpha=.8;
+    rows.forEach(([k,v],i)=>{
+      if(i%2===0){ ctx.fillStyle="rgba(255,255,255,.04)"; rr(r.x-4,ay-fs*.85,r.w+8,fs*1.5,4); ctx.fill(); }
+      text(k, r.x, ay, fs, {col:"rgba(234,215,173,.75)",w:"500"});
+      text(v, r.x+r.w, ay, fs, {col:C.brass,al:"right",w:"700"});
+      ay+=fs*1.5;
+    });
+    ctx.restore();
+  }
+  ctx.restore();
+}
+function drawCardAnim(x,y,w,h){
+  const f=S.flip, r=Math.max(6,w*.06);
+  const p=f.mode==="reveal"||f.mode==="hide" ? clamp(f.t/f.dur,0,1) : 1;
+  const spin = f.mode==="reveal"||f.mode==="hide";
+  const back = f.mode==="back" ? true
+             : f.mode==="reveal" ? p<.5
+             : f.mode==="hide"   ? p>=.5 : false;
+  const k = spin ? Math.max(.02, Math.abs(Math.cos(p*Math.PI))) : 1;
+  ctx.save();
+  ctx.translate(x+w/2,y); ctx.scale(k,1); ctx.translate(-w/2,0);
+  if(spin){ ctx.shadowColor="rgba(0,0,0,.5)"; ctx.shadowBlur=18*(1-k); }
+  if(back) drawBack(0,0,w,h,r); else drawCard(S.card,0,0,w,h,r);
+  // tranche éclairée quand la carte est de profil
+  if(spin && k<.35){ ctx.fillStyle="rgba(255,235,190,"+(.5*(1-k/.35))+")"; rr(0,0,w,h,r); ctx.fill(); }
+  ctx.restore();
+  if(f.mode==="reveal" && p>.85){
+    ctx.save(); ctx.globalAlpha=(p-.85)/.15*.5;
+    ctx.strokeStyle=C.brass; ctx.lineWidth=3; rr(x-4,y-4,w+8,h+8,10); ctx.stroke(); ctx.restore();
+  }
+}
+/* Opacité du nom et du texte de la carte : ils suivent la face visible */
+function cardTextAlpha(){
+  const f=S.flip;
+  if(f.mode==="back") return 0;
+  if(f.mode==="hide")   return clamp(1-f.t/(f.dur*.5),0,1);
+  if(f.mode==="reveal") return clamp((f.t/f.dur-.5)/.35,0,1);
+  return 1;
+}
+function drawHead(){
+  const r=L.head, c=card(), sc=turnScore();
+  const sk=skulls();
+  const fs=clamp(r.h*.52,12,26), fmin=L.compact?11:9;
+  let label = S.island ? (L.compact?"ÎLE DES CRÂNES":"ÎLE DE LA TÊTE-DE-MORT") : (P().ai? P().name.toUpperCase() : "VOTRE TOUR");
+  text(label, r.x, r.y+r.h*.34, clamp(r.h*.3,fmin,14), {col:S.island?C.rust:"rgba(234,215,173,.6)",w:"700",ls:1.4});
+  const risque = !S.island && sc.battleFail;
+  text(S.island? skulls()+" têtes de mort" : (risque? "−"+c.bonus+" pts" : sc.total+" pts"),
+      r.x, r.y+r.h*.75, fs,
+      {col:(S.island||risque)?C.rust:(sc.total>0?C.brass:"rgba(234,215,173,.5)"),font:DISPLAY,w:"700"});
+  // crânes + objectif bataille
+  let info=[];
+  if(!S.island) info.push({t:"☠ "+sk+"/3", c:sk>=2?C.rust:"rgba(234,215,173,.7)"});
+  if(c.need){ const sw=S.dice.filter(d=>(d.zone==="table"||d.zone==="chest")&&d.face===SABRE).length;
+    info.push({t:"Sabres "+sw+"/"+c.need+(L.compact?"":(sw>=c.need?" · +"+c.bonus:" · −"+c.bonus)), c:sw>=c.need?C.jade:C.rust}); }
+  if(c.id==="storm") info.push({t:"Lancer "+Math.max(1,S.rolls)+"/2", c:C.parch2});
+  if(c.id==="witch") info.push({t:S.witchUsed?"Sorcière utilisée":"Sorcière prête", c:S.witchUsed?"rgba(234,215,173,.45)":C.jade});
+  let x=r.x+r.w;
+  info.reverse().forEach(o=>{
+    const s=clamp(r.h*.32,fmin,15); ctx.font="700 "+s+"px "+UI;
+    const w=ctx.measureText(o.t).width+s*1.1;
+    ctx.fillStyle="rgba(255,255,255,.05)"; rr(x-w,r.y+r.h*.42,w,s*1.7,7); ctx.fill();
+    text(o.t,x-w/2,r.y+r.h*.42+s*.85,s,{col:o.c,al:"center",w:"700"});
+    x-=w+6;
+  });
+}
+function drawZones(){
+  zone(L.table.x,L.table.y,L.table.w,L.table.h,null,"rgba(9,30,42,.5)");
+  compass(L.table.x+L.table.w/2, L.table.y+L.table.h/2, Math.min(L.table.w,L.table.h)*.42);
+  rope(L.table.x+3,L.table.y+3,L.table.w-6,L.table.h-6,12,C.brass,.35);
+  zone(L.cove.x,L.cove.y,L.cove.w,L.cove.h,L.compact&&L.useChest?"Crânes":"Têtes de mort","rgba(58,14,10,.45)");
+  if(skulls()>=2){ ctx.save(); ctx.globalAlpha=.12+Math.sin(S.t*3)*.05;
+    ctx.fillStyle=C.rust; rr(L.cove.x,L.cove.y,L.cove.w,L.cove.h,14); ctx.fill(); ctx.restore(); }
+  if(L.useChest){
+    zone(L.chest.x,L.chest.y,L.chest.w,L.chest.h,L.compact?"Coffre":"Coffre — points sécurisés","rgba(60,44,10,.4)");
+    if(!chestDice().length)
+      text(L.compact?"Dés à l'abri":"Sélectionnez des dés puis « Au coffre »", L.chest.x+L.chest.w/2, L.chest.y+L.chest.h*.62,
+           clamp(S.u*.62,9,12), {col:"rgba(234,215,173,.4)",al:"center",w:"500"});
+  }
+}
+function drawDie(d){
+  const s=d.size*d.sc;
+  ctx.save();
+  ctx.translate(d.x,d.y); ctx.rotate(d.rot);
+  ctx.fillStyle="rgba(0,0,0,.45)";
+  rr(-s/2+2,-s/2+4,s,s,s*.2); ctx.fill();
+  drawFace(d.face,0,0,s);
+  if(d.zone==="skull"){ ctx.fillStyle="rgba(184,69,47,.34)"; rr(-s/2,-s/2,s,s,s*.2); ctx.fill();
+    ctx.strokeStyle="rgba(184,69,47,.9)"; ctx.lineWidth=2; rr(-s/2,-s/2,s,s,s*.2); ctx.stroke(); }
+  if(d.zone==="chest"){ ctx.strokeStyle=C.brass; ctx.lineWidth=2.4; rr(-s/2,-s/2,s,s,s*.2); ctx.stroke(); }
+  if(d.virtual){
+    ctx.fillStyle=C.brass; ctx.beginPath(); ctx.arc(s*.38,-s*.38,s*.17,0,7); ctx.fill();
+    text("C", s*.38,-s*.36, s*.22, {col:"#20160a",al:"center",w:"700"});
+  }
+  if(d.sel && d.zone==="table"){
+    ctx.save(); ctx.strokeStyle=C.brass; ctx.lineWidth=3; ctx.setLineDash([7,5]);
+    ctx.lineDashOffset=-S.t*22; rr(-s/2-4,-s/2-4,s+8,s+8,s*.24); ctx.stroke(); ctx.restore();
+    ctx.save(); ctx.globalAlpha=.9; ctx.fillStyle=C.brass;
+    ctx.beginPath(); ctx.arc(-s*.4,-s*.4,s*.16,0,7); ctx.fill();
+    text("↻",-s*.4,-s*.38,s*.24,{col:"#20160a",al:"center",w:"700"}); ctx.restore();
+  }
+  if(!d.virtual && d.zone==="table" && S.hover==="die"+S.dice.indexOf(d) && !P().ai && S.phase==="choose" && !S.island){
+    ctx.strokeStyle="rgba(255,255,255,.5)"; ctx.lineWidth=2; rr(-s/2-2,-s/2-2,s+4,s+4,s*.22); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawSide(){
+  const r=L.side;
+  if(r.w<40) return;                                   // journal masqué (écran bas)
+  if(PORTRAIT){
+    ctx.save(); ctx.fillStyle="rgba(255,255,255,.04)"; rr(r.x,r.y,r.w,r.h,10); ctx.fill(); ctx.restore();
+    const fs=clamp(S.u*.66,10,13);
+    const n=r.h>fs*2.9?2:1;
+    S.log.slice(0,n).forEach((e,i)=>{
+      const lignes=wrap(e.m,fs,r.w-20);
+      text(lignes[0]+(lignes.length>1?"…":""), r.x+10, r.y+r.h*(n===1?.5:(i?.72:.3)), fs, {col:e.c,w:"600"});
+    });
+    return;
+  }
+  ctx.save(); ctx.fillStyle="rgba(255,255,255,.035)"; rr(r.x,r.y,r.w,r.h,12); ctx.fill();
+  ctx.strokeStyle="rgba(217,164,65,.18)"; ctx.stroke(); ctx.restore();
+  text("JOURNAL DE BORD", r.x+12, r.y+S.u*1.1, clamp(S.u*.6,8,12),{col:"rgba(234,215,173,.5)",w:"700",ls:1.5});
+  const fs=clamp(S.u*.66,9,13);
+  let y=r.y+S.u*2.2;
+  for(const e of S.log){
+    const lines=wrap(e.m,fs,r.w-24);
+    if(y+lines.length*fs*1.25>r.y+r.h-8) break;
+    lines.forEach(ln=>{ text(ln,r.x+12,y,fs,{col:e.c,w:"600"}); y+=fs*1.25; });
+    y+=5;
+  }
+}
+function drawMenu(){
+  const cx=W/2;
+  const t=clamp(Math.min(W/11,H/9),22,74);
+  text("MILLE SABORDS", cx, H*(PORTRAIT?.16:.2), t, {col:C.brass,al:"center",font:DISPLAY,w:"700",ls:t*.1,sh:2});
+  text("Jeu de dés pirate — premier à "+TARGET+" points", cx, H*(PORTRAIT?.22:.28), clamp(t*.26,10,18),
+       {col:"rgba(234,215,173,.7)",al:"center",w:"500"});
+  // éventail : dos de carte + trois dés
+  const ch=clamp(H*.30,120,270), cw=ch*(CARD_SW/CARD_SH);
+  const y=H*(PORTRAIT?.30:.36);
+  ctx.save(); ctx.translate(cx,y+ch/2);
+  [-1,0,1].forEach(i=>{
+    ctx.save(); ctx.rotate(i*.16); ctx.translate(i*cw*.42,Math.abs(i)*8);
+    if(i===0) drawCard(0,-cw/2,-ch/2,cw,ch,10); else drawBack(-cw/2,-ch/2,cw,ch,10);
+    ctx.restore();
+  });
+  ctx.restore();
+  const ds=clamp(H*.075,30,64);
+  [SKULL,DIAM,COIN,SABRE,PARROT,MONKEY].forEach((f,i)=>{
+    const n=6, gx=cx-(n*ds+(n-1)*ds*.25)/2+i*(ds*1.25)+ds/2;
+    const bob=Math.sin(S.t*1.6+i*.7)*3;
+    drawFace(f,gx,y+ch+ds*.9+bob,ds);
+  });
+}
+function drawRules(){
+  const w=clamp(W*.86,260,760), x=(W-w)/2, y=L.top.h+S.u*1.2, h=L.btn.y-y-S.u;
+  paraph(x,y,w,h,14);
+  const fs=clamp(S.u*.72,9,14);
+  const R=[
+    ["Le tour","Retournez une carte Pirate, lancez les 8 dés, mettez les têtes de mort de côté."],
+    ["Relancer","Relancez au moins 2 dés autant de fois que vous voulez, jamais les têtes de mort."],
+    ["3 têtes de mort","Le tour est perdu : 0 point (sauf les dés déjà au coffre)."],
+    ["Combinaisons","3 identiques 100 · 4 : 200 · 5 : 500 · 6 : 1000 · 7 : 2000 · 8 : 4000."],
+    ["Symboles","Chaque diamant et chaque pièce d'or valent 100 points de plus."],
+    ["Coffre plein","Si les 8 dés marquent, bonus de 500 points."],
+    ["Île de la Tête-de-Mort","4 têtes de mort ou plus au 1er lancer : vous ne marquez rien, mais chaque nouvelle tête de mort coûte 100 points à chaque adversaire."],
+    ["Bataille","Réunir les sabres demandés rapporte le bonus de la carte ; échouer fait perdre le même nombre de points."],
+    ["Fin","Au-delà de "+TARGET+" points, les autres joueurs jouent un dernier tour. Le meilleur score l'emporte."]
+  ];
+  let ty=y+S.u*1.8;
+  text("RÈGLES", x+w/2, ty, clamp(S.u*1.05,12,20), {col:"#6b3f0c",al:"center",font:DISPLAY,w:"700",ls:2});
+  ty+=S.u*2;
+  for(const [k,v] of R){
+    text(k, x+S.u*1.3, ty, fs, {col:"#7a4a10",w:"700"});
+    ty+=fs*1.35;
+    wrap(v,fs,w-S.u*2.6).forEach(ln=>{ text(ln,x+S.u*1.3,ty,fs,{col:"rgba(40,26,8,.8)",w:"500"}); ty+=fs*1.25; });
+    ty+=fs*.5;
+    if(ty>y+h-fs*2) break;
+  }
+}
+function drawOver(){
+  ctx.save(); ctx.fillStyle="rgba(3,8,13,.8)"; ctx.fillRect(0,0,W,H); ctx.restore();
+  const names=S.winners.map(p=>p.name).join(" & ");
+  const t=clamp(Math.min(W/13,H/11),18,54);
+  text(S.winners.length>1?"ÉGALITÉ":"VICTOIRE", W/2, H*.28, t*.55, {col:C.parch2,al:"center",w:"700",ls:3});
+  text(names.toUpperCase(), W/2, H*.38, t, {col:C.brass,al:"center",font:DISPLAY,w:"700",ls:t*.06});
+  let y=H*.5;
+  [...S.players].sort((a,b)=>b.score-a.score).forEach(p=>{
+    const fs=clamp(S.u*1.05,12,20);
+    text(p.name, W/2-clamp(W*.16,80,180), y, fs, {col:C.parch,w:"600"});
+    text(String(p.score), W/2+clamp(W*.16,80,180), y, fs, {col:C.bone,al:"right",w:"700",font:DISPLAY});
+    y+=fs*1.7;
+  });
+}
+function drawBanner(){
+  if(!S.banner || S.t>S.banner.t){ S.banner=null; return; }
+  const a=clamp((S.banner.t-S.t)/.5,0,1);
+  const fs=clamp(S.u*.95,11,19);
+  ctx.save(); ctx.globalAlpha=a;
+  ctx.font="700 "+fs+"px "+UI;
+  const w=ctx.measureText(S.banner.txt).width+fs*2;
+  const x=W/2-w/2, y=L.head?L.head.y+L.head.h*.1:H*.2;
+  ctx.fillStyle="rgba(6,20,30,.9)"; rr(x,y,w,fs*2,9); ctx.fill();
+  ctx.strokeStyle=S.banner.col; ctx.lineWidth=1.5; ctx.stroke();
+  text(S.banner.txt,W/2,y+fs,fs,{col:S.banner.col,al:"center",w:"700"});
+  ctx.restore();
+}
+function drawPops(){
+  S.pop=S.pop.filter(p=>S.t-p.t<p.life);
+  if(!S.pop.length || !L.table) return;
+  const cx=L.table.x+L.table.w/2, cy=L.table.y+L.table.h*.52;
+  S.pop.forEach(p=>{
+    const k=(S.t-p.t)/p.life;
+    const rise=(1-Math.pow(1-k,3))*L.table.h*.16;
+    const a = k<.1 ? k/.1 : (k>.72 ? (1-k)/.28 : 1);
+    const sc= k<.16 ? .82+.18*(1-Math.pow(1-k/.16,2)) : 1;
+    const fs=clamp(Math.min(S.u*2.1, L.table.w/(p.txt.length*.62)),16,46)*sc;
+    ctx.save(); ctx.globalAlpha=clamp(a,0,1);
+    ctx.fillStyle="rgba(4,14,22,.55)";
+    const bw=Math.min(L.table.w*.92, fs*p.txt.length*.66+fs);
+    rr(cx-bw/2, cy-rise-fs*.95, bw, fs*(p.sub?2.2:1.7), 12); ctx.fill();
+    text(p.txt, cx, cy-rise, fs, {col:p.col,al:"center",font:DISPLAY,w:"700",sh:2});
+    if(p.sub){
+      const ss=clamp(fs*.3,9,15);
+      wrap(p.sub, ss, bw-fs*.6).slice(0,2).forEach((ln,i)=>
+        text(ln, cx, cy-rise+fs*.72+i*ss*1.2, ss, {col:"rgba(234,215,173,.8)",al:"center",w:"600"}));
+    }
+    ctx.restore();
+  });
+}
+
+/* ------------------------------ BOUCLE ----------------------------------- */
+let last=now();
+function update(dt){
+  S.t=now();
+  // retournement de la carte
+  if(S.flip.mode==="reveal"||S.flip.mode==="hide"){
+    S.flip.t+=dt;
+    if(S.flip.t>=S.flip.dur){
+      if(S.flip.mode==="hide"){ S.flip.mode="back"; SFX.card(); }
+      else S.flip.mode=null;
+    }
+  }
+  // le score affiché rattrape le score réel : la barre monte ou descend en direct
+  S.players.forEach(p=>{
+    if(p.disp===undefined) p.disp=p.score;
+    const d=p.score-p.disp;
+    if(Math.abs(d)<1) p.disp=p.score;
+    else p.disp+=Math.sign(d)*Math.min(Math.abs(d), Math.max(900, Math.abs(d)*3.2)*dt);
+  });
+  if(S.phase==="card" && S.flip.mode===null){
+    if(P().ai && !S.aiAt) S.aiAt=S.t+.45;
+    if(P().ai && S.t>S.aiAt){ S.aiAt=0; rollDice(realTable()); }
+  }
+  // fin de tour : on laisse le temps de lire, puis la carte suivante se retourne
+  if(S.phase==="resolve" && S.t>S.resolveUntil) nextTurn();
+  // animations de dés
+  let rolling=false;
+  S.dice.forEach(d=>{
+    if(d.anim){
+      const a=d.anim; a.t+=dt;
+      if(a.t<a.delay){ rolling=true; return; }
+      const k=(a.t-a.delay)/a.dur;
+      if(k<1){
+        rolling=true;
+        a.flick+=dt;
+        if(a.flick>.055){ a.flick=0; d.face=ri(6); }
+        d.rot=Math.sin(k*22)*(1-k)*.5;
+        d.sc=1+Math.sin(k*Math.PI)*.16;
+      }else{
+        d.face=a.final; d.anim=null; d.rot=0; d.sc=1;
+      }
+    }
+    d.x=lerp(d.x,d.tx,1-Math.pow(.001,dt));
+    d.y=lerp(d.y,d.ty,1-Math.pow(.001,dt));
+  });
+  if(S.pendingAfterRoll && !rolling){ S.pendingAfterRoll=false; afterRoll(); }
+  // IA
+  const pl=S.players[S.cur];
+  if(pl && pl.ai && S.phase==="choose"){
+    if(!S.aiAt) S.aiAt=S.t+.8;                       // jamais de tour d'IA figé
+    else if(S.t>S.aiAt){ S.aiAt=0; aiAct(); }
+  }
+}
+function render(){
+  ctx.clearRect(0,0,W,H);
+  bg();
+  if(S.phase==="menu"){ drawTop(); drawMenu(); }
+  else if(S.phase==="rules"){ drawTop(); drawRules(); }
+  else{
+    drawCardPanel();
+    drawHead();
+    drawZones();
+    placeDice();
+    if(S.rolls===0 && S.phase==="card"){
+      text("8 dés prêts à être lancés", L.table.x+L.table.w/2, L.table.y+L.table.h/2,
+           clamp(S.u*.9,10,17), {col:"rgba(234,215,173,.45)",al:"center",w:"600"});
+    }else{
+      S.dice.filter(d=>d.zone!=="table").forEach(drawDie);
+      S.dice.filter(d=>d.zone==="table").forEach(drawDie);
+    }
+    drawSide();
+    drawBanner();
+    drawPops();
+    if(S.phase==="over") drawOver();
+    drawTop();                     // la barre de progression reste lisible par-dessus les voiles
+  }
+  btnRects(L.btnList).forEach(drawBtn);
+}
+function loop(){
+  const t=now(); const dt=Math.min(.05,t-last); last=t;
+  layout(); update(dt); render();
+  requestAnimationFrame(loop);
+}
+
+/* ------------------------------ ENTRÉES ---------------------------------- */
+const SAFE={t:0,b:0};
+function resize(){
+  const st=document.getElementById("sat"), sb=document.getElementById("sab");
+  SAFE.t = st?st.offsetHeight:0; SAFE.b = sb?sb.offsetHeight:0;
+  DPR=Math.min(window.devicePixelRatio||1,2.5);
+  W=cv.clientWidth; H=cv.clientHeight;
+  cv.width=Math.round(W*DPR); cv.height=Math.round(H*DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  layout();
+}
+window.addEventListener("resize",resize);
+window.addEventListener("orientationchange",()=>setTimeout(resize,120));
+
+function at(e){
+  const r=cv.getBoundingClientRect();
+  const p=(e.touches&&e.touches[0])||e;
+  return {x:p.clientX-r.left, y:p.clientY-r.top};
+}
+function hit(b,p){ return p.x>=b.x&&p.x<=b.x+b.w&&p.y>=b.y&&p.y<=b.y+b.h; }
+
+function press(p){
+  const bs=btnRects(L.btnList);
+  for(const b of bs){ if(hit(b,p)){ if(b.on){ SFX.click(); action(b.id); } return; } }
+  if(S.phase==="choose" && isHuman() && !S.island){
+    for(const d of S.dice){
+      if(d.zone!=="table"||d.virtual) continue;
+      const s=d.size;
+      if(p.x>d.x-s/2-4&&p.x<d.x+s/2+4&&p.y>d.y-s/2-4&&p.y<d.y+s/2+4){ d.sel=!d.sel; SFX.click(); return; }
+    }
+  }
+  if(S.phase==="resolve"){ S.resolveUntil=Math.min(S.resolveUntil, S.t+.15); }
+}
+function action(id){
+  switch(id){
+    case "play": newGame(S.nAI); break;
+    case "ai1": S.nAI=1; break;
+    case "ai2": S.nAI=2; break;
+    case "ai3": S.nAI=3; break;
+    case "rules": S.prev=S.phase; S.phase="rules"; break;
+    case "back": S.phase=S.prev||"menu"; break;
+    case "menu": S.phase="menu"; S.players=[]; S.dice=[]; break;
+    case "first": rollDice(realTable()); break;
+    case "roll":
+      if(S.island){ tableDice().forEach(d=>{if(!d.virtual)d.sel=true;}); rollDice(realTable()); }
+      else rollDice(S.dice.filter(d=>d.zone==="table"&&!d.virtual&&d.sel));
+      break;
+    case "bank": resolve(); break;
+    case "all": {
+      const rt=realTable(), all=rt.every(d=>d.sel);
+      rt.forEach(d=>d.sel=!all); break;
+    }
+    case "tochest": {
+      const sel=S.dice.filter(d=>d.zone==="table"&&!d.virtual&&d.sel);
+      sel.forEach(d=>{ d.zone="chest"; d.sel=false; });
+      say("Vous mettez "+sel.length+" dé"+(sel.length>1?"s":"")+" au coffre.", C.brass);
+      if(stuck()) resolve();
+      break;
+    }
+    case "witch": useWitch(); break;
+
+  }
+}
+cv.addEventListener("pointerdown",e=>{ e.preventDefault(); press(at(e)); });
+cv.addEventListener("pointerup",()=>{ S.hover=null; });
+cv.addEventListener("pointercancel",()=>{ S.hover=null; });
+cv.addEventListener("pointermove",e=>{
+  const p=at(e); S.hover=null;
+  for(const b of btnRects(L.btnList)) if(hit(b,p)&&b.on){ S.hover=b.id; break; }
+  if(!S.hover && S.phase==="choose" && isHuman()){
+    S.dice.forEach((d,i)=>{ if(d.zone==="table"&&!d.virtual){
+      const s=d.size;
+      if(p.x>d.x-s/2&&p.x<d.x+s/2&&p.y>d.y-s/2&&p.y<d.y+s/2) S.hover="die"+i;
+    }});
+  }
+});
+window.addEventListener("keydown",e=>{
+  if(e.key===" "||e.key==="Enter"){
+    e.preventDefault();
+    const bs=(L.btnList||[]).filter(b=>b.on);
+    const b=bs.find(x=>x.k==="gold")||bs[0];
+    if(b){ SFX.click(); action(b.id); }
+  }
+  if(e.key==="m"||e.key==="M") muted=!muted;
+});
+
+/* ------------------------------ DÉMARRAGE -------------------------------- */
+resize();
+loadAll(()=>{
+  document.getElementById("boot").style.display="none";
+  buildDeck();
+  requestAnimationFrame(loop);
+});
+</script>
+</body>
+</html>
