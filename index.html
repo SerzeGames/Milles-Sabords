@@ -10,7 +10,9 @@
     font-family:"Trebuchet MS","Segoe UI",system-ui,sans-serif;
     -webkit-tap-highlight-color:transparent;overscroll-behavior:none;touch-action:none;
     -webkit-user-select:none;user-select:none}
-  #game{display:block;width:100%;height:100%}
+  #bgv{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;
+    background:#06111a;pointer-events:none}
+  #game{position:fixed;inset:0;display:block;width:100%;height:100%;z-index:1}
   #sat,#sab{position:fixed;left:0;width:0;pointer-events:none}
   #sat{top:0;height:env(safe-area-inset-top,0px)}
   #sab{bottom:0;height:env(safe-area-inset-bottom,0px)}
@@ -19,6 +21,7 @@
 </style>
 </head>
 <body>
+<video id="bgv" muted loop playsinline autoplay preload="auto" disablepictureinpicture></video>
 <canvas id="game"></canvas>
 <div id="sat"></div><div id="sab"></div>
 <div id="boot">Chargement…</div>
@@ -31,10 +34,12 @@
 
 /* ------------------------------ CONFIG ---------------------------------- */
 const DIR = "images/";
+const VIDEO_FOND = "video/pirate.mp4";   // "" pour se passer de la vidéo de fond
+const VOILE      = .0                  // opacité du voile sombre posé sur la vidéo
 const SRC = { sheet: DIR+"spritesheet.png", dice: DIR+"dice.png", back: DIR+"BackCard.png" };
 
 const TARGET        = 6000;   // seuil qui déclenche le dernier tour
-const ROI_COIN      = 200;    // carte Roi : valeur d'une pièce d'or
+const PAIX_MALUS    = 500;    // carte La Paix : points perdus par sabre restant
 const BATAILLE_MALUS= true;   // échec d'une Bataille = on perd les points de la carte (false = simple tour à 0)
 const ILE_MIN       = 4;      // têtes de mort au 1er lancer pour l'Île
 const SCORE_MIN_0   = false;  // true = plancher à 0 / false = les scores peuvent passer dans le négatif
@@ -64,7 +69,7 @@ const CARDS = [
  {id:"bat2",   n:"Bataille — 2 sabres", copies:2, t:"Réunissez au moins 2 sabres : +300 pts. Sinon vous perdez 300 pts.", need:2, bonus:300},
  {id:"bat3",   n:"Bataille — 3 sabres", copies:2, t:"Réunissez au moins 3 sabres : +500 pts. Sinon vous perdez 500 pts.", need:3, bonus:500},
  {id:"bat4",   n:"Bataille — 4 sabres", copies:2, t:"Réunissez au moins 4 sabres : +1000 pts. Sinon vous perdez 1000 pts.", need:4, bonus:1000},
- {id:"king",   n:"Roi",                 copies:1, t:"Chaque pièce d'or vaut "+ROI_COIN+" pts au lieu de 100."},
+ {id:"peace",  n:"La Paix",             copies:1, t:"Terminez le tour sans aucun sabre : vos points sont doublés. Sinon vous ne marquez rien et perdez "+PAIX_MALUS+" pts par sabre restant. Les sabres peuvent être relancés autant de fois qu'il faut."},
  {id:"storm",  n:"Naufrage",            copies:1, t:"2 lancers seulement, les têtes de mort ne vous éliminent pas. Après le 2e lancer, seuls diamants et pièces marquent, en double (symboles et combinaisons)."},
 ];
 
@@ -143,6 +148,12 @@ function rope(x,y,w,h,r=14,col=C.brass,alpha=.75){ // liseré façon cordage
   rr(x,y,w,h,r); ctx.stroke();
   ctx.setLineDash([]); ctx.restore();
 }
+/* Fond local sous les textes quand la vidéo tourne, pour garder du contraste */
+function scrim(r,a){
+  if(!fondAnime()||!r) return;
+  ctx.save(); ctx.fillStyle="rgba(4,14,22,"+a+")";
+  rr(r.x-6,r.y-6,r.w+12,r.h+12,14); ctx.fill(); ctx.restore();
+}
 function zone(x,y,w,h,label,tint){
   ctx.save();
   ctx.fillStyle=tint||"rgba(6,20,30,.45)"; rr(x,y,w,h,14); ctx.fill();
@@ -174,6 +185,32 @@ const SFX = {
   card:()=>beep(320,.1,"sine",.04,180),
   click:()=>beep(420,.05,"square",.03)
 };
+
+/* ------------------------------ VIDÉO ----------------------------------- */
+let VIDEO_ON = true, videoPrete = false;
+const bgv = document.getElementById("bgv");
+function initVideo(){
+  if(!bgv) return;
+  if(!VIDEO_FOND){ bgv.remove(); return; }
+  bgv.src = VIDEO_FOND;
+  bgv.addEventListener("canplay", ()=>{ videoPrete = true; });
+  bgv.addEventListener("error",   ()=>{ videoPrete = false; bgv.style.display="none"; });
+  lireVideo();
+  // certains navigateurs mobiles attendent un geste avant de lancer la lecture
+  window.addEventListener("pointerdown", lireVideo, {once:true});
+  document.addEventListener("visibilitychange", ()=>{ document.hidden ? bgv.pause() : lireVideo(); });
+}
+function lireVideo(){
+  if(!bgv || !VIDEO_ON || !VIDEO_FOND) return;
+  const p = bgv.play(); if(p && p.catch) p.catch(()=>{});
+}
+function basculeVideo(){
+  VIDEO_ON = !VIDEO_ON;
+  if(!bgv) return;
+  bgv.style.display = VIDEO_ON ? "" : "none";
+  if(VIDEO_ON) lireVideo(); else bgv.pause();
+}
+const fondAnime = ()=> VIDEO_ON && videoPrete;
 
 /* ------------------------------ ASSETS ---------------------------------- */
 const IMG={}; let loaded=0;
@@ -231,7 +268,9 @@ function chestDice(){ return S.dice.filter(d=>d.zone==="chest"); }
 function skullDice(){ return S.dice.filter(d=>d.zone==="skull"); }
 function realSkulls(){ return S.dice.filter(d=>d.zone==="skull" && !d.virtual); }
 function skulls(){ return skullDice().length; }
-function selCount(){ return S.dice.filter(d=>d.zone==="table" && !d.virtual && d.sel).length; }
+function rerollable(){ return S.dice.filter(d=>(d.zone==="table"||d.zone==="chest") && !d.virtual); }
+function selCount(){ return rerollable().filter(d=>d.sel).length; }
+function selTable(){ return S.dice.filter(d=>d.zone==="table" && !d.virtual && d.sel).length; }
 
 function newGame(nAI){
   S.nAI = nAI;
@@ -247,8 +286,8 @@ function buildDeck(){
   for(let i=S.deck.length-1;i>0;i--){ const j=ri(i+1); [S.deck[i],S.deck[j]]=[S.deck[j],S.deck[i]]; }
 }
 function nextTurn(){
-  if(S.lastRound && S.cur===S.endAt){ gameOver(); return; }
   S.cur = (S.cur+1)%S.players.length;
+  // le tour est revenu au joueur qui a franchi le seuil : tout le monde a joué
   if(S.lastRound && S.cur===S.endAt){ gameOver(); return; }
   startTurn();
 }
@@ -329,7 +368,7 @@ function afterRoll(){
 }
 /* Aucune relance possible et rien à encaisser : le tour s'arrête tout seul */
 function stuck(){
-  if(realTable().length>=2) return false;
+  if(rerollable().length>=2) return false;   // on peut toujours ressortir des dés du coffre
   const sc=turnScore();
   return sc.total<=0 || sc.battleFail;
 }
@@ -355,7 +394,11 @@ function turnScore(){
 
   if(S.island){
     const n=skulls();
-    return {total:0, lines:[{l:"Île de la Tête-de-Mort — "+n+" têtes de mort", p:0}], island:n, swords:0};
+    // la Paix doit être tenue même sur l'île : les sabres restants comptent
+    const sw=S.dice.filter(d=>(d.zone==="table"||d.zone==="chest") && d.face===SABRE).length;
+    const paix=c.id==="peace" && sw>0;
+    return {total:0, lines:[{l:"Île de la Tête-de-Mort — "+n+" têtes de mort", p:0}],
+            island:n, swords:sw, battleFail:paix, malus:paix?PAIX_MALUS*sw:0};
   }
   const lost = skulls()>=3 && c.id!=="storm";
   let src;
@@ -373,9 +416,9 @@ function turnScore(){
     if(p>0){ total+=p; scoringKeys.add(k); lines.push({l:"Combinaison — "+labelOf(k,n), p}); }
   });
   const nd=faces.filter(f=>f===DIAM).length, nc=faces.filter(f=>f===COIN).length;
-  const cv=(c.id==="king")?ROI_COIN:100;
+  const cv=100;
   if(nd) { total+=nd*100; lines.push({l:nd+" "+(nd>1?"diamants":"diamant")+" × 100", p:nd*100}); }
-  if(nc) { total+=nc*cv;  lines.push({l:nc+" "+(nc>1?"pièces d'or":"pièce d'or")+" × "+cv+(c.id==="king"?" (Roi)":""), p:nc*cv}); }
+  if(nc) { total+=nc*cv;  lines.push({l:nc+" "+(nc>1?"pièces d'or":"pièce d'or")+" × "+cv, p:nc*cv}); }
 
   // Coffre plein : les 8 dés réels marquent
   if(!lost && c.id!=="storm"){
@@ -385,14 +428,25 @@ function turnScore(){
   }
   if(c.id==="storm"){ total*=2; if(total) lines.push({l:"Naufrage — diamants et pièces doublés", p:0}); }
 
-  // Bataille
+  // Objectifs liés aux sabres : Bataille (il en faut) et La Paix (il n'en faut aucun)
   const swords = S.dice.filter(d=>(d.zone==="table"||d.zone==="chest") && d.face===SABRE).length;
-  let battleFail=false;
+  let battleFail=false, malus=0;
+  if(c.id==="peace"){
+    if(swords===0){
+      if(!lost){ total*=2; lines.push({l:"La Paix — aucun sabre, points doublés", p:0}); }
+    }else{
+      battleFail=true; malus=PAIX_MALUS*swords;
+      if(S.phase==="resolve"||S.phase==="over"){
+        total=-malus;
+        lines.length=0; lines.push({l:"La Paix rompue — "+swords+" sabre"+(swords>1?"s":""), p:total});
+      }
+    }
+  }
   if(c.need){
     const won = !lost && swords>=c.need;
     if(won){ total+=c.bonus; lines.push({l:"Bataille remportée ("+swords+" sabres)", p:c.bonus}); }
     else{
-      battleFail=true;
+      battleFail=true; malus=c.bonus;
       if(S.phase==="resolve"||S.phase==="over"){
         total = BATAILLE_MALUS ? -c.bonus : 0;
         lines.length=0; lines.push({l:"Bataille perdue — "+swords+"/"+c.need+" sabres", p:total});
@@ -401,7 +455,7 @@ function turnScore(){
   }
   if(lost && !c.need && !lines.length) lines.push({l:"3 têtes de mort — tour perdu", p:0});
   if(c.id==="pirate" && total>0){ total*=2; lines.push({l:"Pirate — points doublés", p:0}); }
-  return {total, lines, island:0, swords, lost, battleFail};
+  return {total, lines, island:0, swords, lost, battleFail, malus};
 }
 
 function resolve(){
@@ -413,15 +467,24 @@ function resolve(){
     S.players.forEach((q,i)=>{ if(i!==S.cur){ q.score-=pen; if(SCORE_MIN_0) q.score=Math.max(0,q.score); } });
     SFX.skull();
     say(p.name+" : île de la Tête-de-Mort, -"+pen+" pour les autres.", C.rust);
-    S.pop.push({txt:"ÎLE DE LA TÊTE-DE-MORT", sub:n+" têtes de mort · -"+pen+" pour chaque adversaire",
-                col:C.rust, t:S.t, life:2.1});
+    let sub=n+" têtes de mort · -"+pen+" pour chaque adversaire";
+    if(c.id==="peace" && r.swords>0){          // la Paix doit être tenue même sur l'île
+      const m=PAIX_MALUS*r.swords;
+      p.score-=m; if(SCORE_MIN_0) p.score=Math.max(0,p.score);
+      sub+=" · La Paix rompue : -"+m;
+      say(p.name+" laissait "+r.swords+" sabre"+(r.swords>1?"s":"")+" : -"+m+".", C.rust);
+    }
+    S.pop.push({txt:L.compact?"ÎLE DES CRÂNES":"ÎLE DE LA TÊTE-DE-MORT", sub, col:C.rust, t:S.t, life:2.1});
   } else if(r.total<=0){
-    const trois = skulls()>=3 && c.id!=="storm";
-    const head = r.battleFail ? "BATAILLE PERDUE" : (trois ? "3 TÊTES DE MORT" : "AUCUN POINT");
+    const trois = skulls()>=3 && c.id!=="storm", paix = c.id==="peace";
+    const head = r.battleFail ? (paix?"LA PAIX ROMPUE":"BATAILLE PERDUE")
+                              : (trois ? "3 TÊTES DE MORT" : "AUCUN POINT");
     let sub = "Tour perdu";
     if(r.total<0){
       p.score+=r.total; if(SCORE_MIN_0) p.score=Math.max(0,p.score);
-      sub = r.total+" points"+(trois?" · 3 têtes de mort":" · "+r.swords+"/"+c.need+" sabres");
+      const detail = paix ? r.swords+" sabre"+(r.swords>1?"s":"")+" au dernier lancer"
+                          : (trois ? "3 têtes de mort" : r.swords+"/"+c.need+" sabres");
+      sub = r.total+" points · "+detail;
     }
     SFX.skull();
     say(p.name+" : "+head.toLowerCase()+(r.total<0?" ("+r.total+" pts, total "+p.score+")":"")+".", C.rust);
@@ -488,7 +551,8 @@ const nowMs=()=> (typeof performance!=="undefined"&&performance.now)?performance
 
 /* Score final d'une position exprimée en comptes de faces (version rapide). */
 function fastScore(tab,chest,bonus,sk,cIdx){
-  const c=CARDS[cIdx], coinV=(c.id==="king")?ROI_COIN:100;
+  const c=CARDS[cIdx], coinV=100;
+  if(c.id==="peace" && tab[SABRE]+chest[SABRE]>0) return -PAIX_MALUS*(tab[SABRE]+chest[SABRE]);
   if(c.id==="storm"){
     const d=tab[DIAM]+chest[DIAM]+bonus[DIAM], m=tab[COIN]+chest[COIN]+bonus[COIN];
     return (comboPts(d)+comboPts(m)+d*100+m*coinV)*2;
@@ -517,6 +581,7 @@ function fastScore(tab,chest,bonus,sk,cIdx){
     if(tab[SABRE]+chest[SABRE]>=c.need) total+=c.bonus;
     else return BATAILLE_MALUS?-c.bonus:0;
   }
+  if(c.id==="peace") total*=2;                 // ici, aucun sabre : la Paix est tenue
   if(c.id==="pirate"&&total>0) total*=2;
   return total;
 }
@@ -538,6 +603,7 @@ function grpSize(st,f){
 /* Faces qu'il serait absurde de relancer */
 function lockedFace(st,f){
   const c=CARDS[st.cIdx];
+  if(c.id==="peace"&&f===SABRE) return false; // la Paix : un sabre doit toujours repartir
   if(f===DIAM||f===COIN) return true;        // 100 points déjà acquis
   if(c.need&&f===SABRE)  return true;        // bataille : chaque sabre compte
   return grpSize(st,f)>=3;                   // combinaison déjà faite
@@ -552,9 +618,10 @@ function sacPri(st,f){
 }
 /* Plan de relance « raisonnable » utilisé pendant les simulations */
 function junkPlan(st){
-  const k=[0,0,0,0,0,0]; let n=0;
+  const c=CARDS[st.cIdx], k=[0,0,0,0,0,0]; let n=0;
+  if(c.id==="peace"&&st.tab[SABRE]){ k[SABRE]=st.tab[SABRE]; n+=st.tab[SABRE]; }
   for(let f=1;f<6;f++){
-    if(!st.tab[f]||lockedFace(st,f)||grpSize(st,f)>=2) continue;
+    if(!st.tab[f]||k[f]||lockedFace(st,f)||grpSize(st,f)>=2) continue;
     k[f]=st.tab[f]; n+=st.tab[f];
   }
   if(n<2){
@@ -578,7 +645,8 @@ function rollout(st){
     if(pl.n<2) break;
     const risque=pAtLeast(pl.n,3-st.sk);
     const bataille=c.need&&(st.tab[SABRE]+st.chest[SABRE])<c.need;
-    if(!(bataille||cur<=0||risque*Math.max(cur,150)<(1-risque)*pl.n*72)) break;
+    const paix=c.id==="peace"&&(st.tab[SABRE]+st.chest[SABRE])>0;
+    if(!(bataille||paix||cur<=0||risque*Math.max(cur,150)<(1-risque)*pl.n*72)) break;
     for(let f=1;f<6;f++) st.tab[f]-=pl.k[f];
     for(let j=0;j<pl.n;j++){ const f=ri(6); if(f===SKULL) st.sk++; else st.tab[f]++; }
   }
@@ -607,6 +675,11 @@ function aiCands(st){
     if(n>=2) out.push({k,n});
   }
   if(out.length===1){ const pl=junkPlan(st); if(pl.n>=2) out.push(pl); }
+  if(CARDS[st.cIdx].id==="peace" && st.tab[SABRE]>0){     // aucun sabre ne peut rester
+    let f2=out.filter(o=>o.n>=2 && o.k[SABRE]===st.tab[SABRE]);
+    if(!f2.length){ const pl=junkPlan(st); if(pl.n>=2) f2=[pl]; }
+    if(f2.length) return f2;
+  }
   return out;
 }
 function applyPlan(st,o){
@@ -781,6 +854,8 @@ function buttons(){
   if(S.phase==="menu"){
     b.push({id:"play",  l:"Nouvelle partie", k:"gold", on:true, row:0});
     b.push({id:"rules", l:"Règles", k:"ghost", on:true, row:0});
+    if(VIDEO_FOND) b.push({id:"video", l:VIDEO_ON?"Fond vidéo ✓":"Fond vidéo ✕",
+                           k:VIDEO_ON?"sel":"ghost", on:true, row:0});
     b.push({id:"ai1",   l:"1 adversaire",  k:S.nAI===1?"sel":"ghost", on:true, row:1});
     b.push({id:"ai2",   l:"2 adversaires", k:S.nAI===2?"sel":"ghost", on:true, row:1});
     b.push({id:"ai3",   l:"3 adversaires", k:S.nAI===3?"sel":"ghost", on:true, row:1});
@@ -800,14 +875,17 @@ function buttons(){
       return b;
     }
     if(S.island){ b.push({id:"roll",l:"Relancer les dés",k:"gold",on:true}); return b; }
-    const canRoll=realTable().length>=2;
+    const canRoll=rerollable().length>=2, selT=selTable();
     b.push({id:"roll", l:sel>=2?(L.compact?"Relancer ("+sel+")":"Relancer "+sel+" dés"):"Relancer", k:"gold", on:sel>=2&&canRoll});
     if(!(c.id==="storm"&&S.rolls<2))
-      b.push({id:"bank", l:sc.battleFail?(L.compact?c.need+" sabres requis":"Il faut "+c.need+" sabres (−"+c.bonus+")")
-                                        :(L.compact?"Encaisser "+sc.total:"Encaisser "+sc.total+" pts"),
+      b.push({id:"bank", l:sc.battleFail
+                ?(c.id==="peace"
+                    ?(L.compact?"Sabres à éliminer":"Terminez sans sabre (−"+sc.malus+")")
+                    :(L.compact?c.need+" sabres requis":"Il faut "+c.need+" sabres (−"+c.bonus+")"))
+                :(L.compact?"Encaisser "+sc.total:"Encaisser "+sc.total+" pts"),
               k:"green", on:sc.total>0 && !sc.battleFail});
     b.push({id:"all", l:sel===realTable().length?"Aucun":"Tout", k:"ghost", on:canRoll});
-    if(c.id==="chest") b.push({id:"tochest", l:"Au coffre"+(sel?" ("+sel+")":""), k:"ghost", on:sel>=1});
+    if(c.id==="chest") b.push({id:"tochest", l:"Au coffre"+(selT?" ("+selT+")":""), k:"ghost", on:selT>=1});
     if(c.id==="witch" && !S.witchUsed && realSkulls().length) b.push({id:"witch",l:"Sorcière",k:"ghost",on:true});
     if(PORTRAIT && b.length>3) b.forEach(x=>{ if(x.k==="ghost") x.row=1; });
     return b;
@@ -852,17 +930,24 @@ function drawBtn(b){
 /* ------------------------------ RENDU ------------------------------------ */
 function bg(){
   const g=ctx.createLinearGradient(0,0,0,H);
-  g.addColorStop(0,"#04101a"); g.addColorStop(.55,C.deep); g.addColorStop(1,"#071a22");
-  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
-  // houle discrète
-  ctx.save(); ctx.globalAlpha=.05; ctx.strokeStyle=C.jade; ctx.lineWidth=1;
-  for(let i=0;i<6;i++){
-    const y=H*(.2+i*.13)+Math.sin(S.t*.4+i)*6;
-    ctx.beginPath();
-    for(let x=0;x<=W;x+=26) ctx.lineTo(x, y+Math.sin(x/120+S.t*.5+i)*4);
-    ctx.stroke();
+  if(fondAnime()){                       // la vidéo doit rester visible sous le jeu
+    g.addColorStop(0,"rgba(3,12,20,"+Math.min(1,VOILE+.08)+")");
+    g.addColorStop(.55,"rgba(9,32,44,"+VOILE+")");
+    g.addColorStop(1,"rgba(4,18,28,"+Math.min(1,VOILE+.05)+")");
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  }else{
+    g.addColorStop(0,"#04101a"); g.addColorStop(.55,C.deep); g.addColorStop(1,"#071a22");
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+    // houle discrète (inutile quand la vraie mer s'en charge)
+    ctx.save(); ctx.globalAlpha=.05; ctx.strokeStyle=C.jade; ctx.lineWidth=1;
+    for(let i=0;i<6;i++){
+      const y=H*(.2+i*.13)+Math.sin(S.t*.4+i)*6;
+      ctx.beginPath();
+      for(let x=0;x<=W;x+=26) ctx.lineTo(x, y+Math.sin(x/120+S.t*.5+i)*4);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
-  ctx.restore();
   const v=ctx.createRadialGradient(W/2,H*.45,Math.min(W,H)*.25,W/2,H*.5,Math.max(W,H)*.75);
   v.addColorStop(0,"rgba(0,0,0,0)"); v.addColorStop(1,"rgba(0,0,0,.6)");
   ctx.fillStyle=v; ctx.fillRect(0,0,W,H);
@@ -931,6 +1016,7 @@ function drawProgress(){
 function drawCardPanel(){
   const r=L.card;
   const c=card();
+  scrim(r,.45);
   const ta=cardTextAlpha();
   if(PORTRAIT){
     const ch=r.h, cwid=ch*(CARD_SW/CARD_SH);
@@ -1003,12 +1089,13 @@ function cardTextAlpha(){
 }
 function drawHead(){
   const r=L.head, c=card(), sc=turnScore();
+  scrim(r,.4);
   const sk=skulls();
   const fs=clamp(r.h*.52,12,26), fmin=L.compact?11:9;
   let label = S.island ? (L.compact?"ÎLE DES CRÂNES":"ÎLE DE LA TÊTE-DE-MORT") : (P().ai? P().name.toUpperCase() : "VOTRE TOUR");
   text(label, r.x, r.y+r.h*.34, clamp(r.h*.3,fmin,14), {col:S.island?C.rust:"rgba(234,215,173,.6)",w:"700",ls:1.4});
-  const risque = !S.island && sc.battleFail;
-  text(S.island? skulls()+" têtes de mort" : (risque? "−"+c.bonus+" pts" : sc.total+" pts"),
+  const risque = sc.battleFail && (!S.island || c.id==="peace");
+  text(S.island&&!risque? skulls()+" têtes de mort" : (risque? "−"+sc.malus+" pts" : sc.total+" pts"),
       r.x, r.y+r.h*.75, fs,
       {col:(S.island||risque)?C.rust:(sc.total>0?C.brass:"rgba(234,215,173,.5)"),font:DISPLAY,w:"700"});
   // crânes + objectif bataille
@@ -1016,8 +1103,12 @@ function drawHead(){
   if(!S.island) info.push({t:"☠ "+sk+"/3", c:sk>=2?C.rust:"rgba(234,215,173,.7)"});
   if(c.need){ const sw=S.dice.filter(d=>(d.zone==="table"||d.zone==="chest")&&d.face===SABRE).length;
     info.push({t:"Sabres "+sw+"/"+c.need+(L.compact?"":(sw>=c.need?" · +"+c.bonus:" · −"+c.bonus)), c:sw>=c.need?C.jade:C.rust}); }
+  if(c.id==="peace"){ const sw=sc.swords;
+    info.push({t: sw===0 ? (L.compact?"Sans sabre ✓":"Aucun sabre · ×2")
+                         : sw+" sabre"+(sw>1?"s":"")+" · −"+(PAIX_MALUS*sw), c: sw===0?C.jade:C.rust}); }
   if(c.id==="storm") info.push({t:"Lancer "+Math.max(1,S.rolls)+"/2", c:C.parch2});
   if(c.id==="witch") info.push({t:S.witchUsed?"Sorcière utilisée":"Sorcière prête", c:S.witchUsed?"rgba(234,215,173,.45)":C.jade});
+  if(S.lastRound) info.push({t:"Dernier tour", c:C.brass});
   let x=r.x+r.w;
   info.reverse().forEach(o=>{
     const s=clamp(r.h*.32,fmin,15); ctx.font="700 "+s+"px "+UI;
@@ -1028,7 +1119,7 @@ function drawHead(){
   });
 }
 function drawZones(){
-  zone(L.table.x,L.table.y,L.table.w,L.table.h,null,"rgba(9,30,42,.5)");
+  zone(L.table.x,L.table.y,L.table.w,L.table.h,null,fondAnime()?"rgba(7,24,34,.62)":"rgba(9,30,42,.5)");
   compass(L.table.x+L.table.w/2, L.table.y+L.table.h/2, Math.min(L.table.w,L.table.h)*.42);
   rope(L.table.x+3,L.table.y+3,L.table.w-6,L.table.h-6,12,C.brass,.35);
   zone(L.cove.x,L.cove.y,L.cove.w,L.cove.h,L.compact&&L.useChest?"Crânes":"Têtes de mort","rgba(58,14,10,.45)");
@@ -1055,14 +1146,14 @@ function drawDie(d){
     ctx.fillStyle=C.brass; ctx.beginPath(); ctx.arc(s*.38,-s*.38,s*.17,0,7); ctx.fill();
     text("C", s*.38,-s*.36, s*.22, {col:"#20160a",al:"center",w:"700"});
   }
-  if(d.sel && d.zone==="table"){
+  if(d.sel && (d.zone==="table"||d.zone==="chest")){
     ctx.save(); ctx.strokeStyle=C.brass; ctx.lineWidth=3; ctx.setLineDash([7,5]);
     ctx.lineDashOffset=-S.t*22; rr(-s/2-4,-s/2-4,s+8,s+8,s*.24); ctx.stroke(); ctx.restore();
     ctx.save(); ctx.globalAlpha=.9; ctx.fillStyle=C.brass;
     ctx.beginPath(); ctx.arc(-s*.4,-s*.4,s*.16,0,7); ctx.fill();
     text("↻",-s*.4,-s*.38,s*.24,{col:"#20160a",al:"center",w:"700"}); ctx.restore();
   }
-  if(!d.virtual && d.zone==="table" && S.hover==="die"+S.dice.indexOf(d) && !P().ai && S.phase==="choose" && !S.island){
+  if(!d.virtual && (d.zone==="table"||d.zone==="chest") && S.hover==="die"+S.dice.indexOf(d) && !P().ai && S.phase==="choose" && !S.island){
     ctx.strokeStyle="rgba(255,255,255,.5)"; ctx.lineWidth=2; rr(-s/2-2,-s/2-2,s+4,s+4,s*.22); ctx.stroke();
   }
   ctx.restore();
@@ -1071,7 +1162,8 @@ function drawSide(){
   const r=L.side;
   if(r.w<40) return;                                   // journal masqué (écran bas)
   if(PORTRAIT){
-    ctx.save(); ctx.fillStyle="rgba(255,255,255,.04)"; rr(r.x,r.y,r.w,r.h,10); ctx.fill(); ctx.restore();
+    ctx.save(); ctx.fillStyle=fondAnime()?"rgba(4,14,22,.5)":"rgba(255,255,255,.04)";
+    rr(r.x,r.y,r.w,r.h,10); ctx.fill(); ctx.restore();
     const fs=clamp(S.u*.66,10,13);
     const n=r.h>fs*2.9?2:1;
     S.log.slice(0,n).forEach((e,i)=>{
@@ -1080,7 +1172,8 @@ function drawSide(){
     });
     return;
   }
-  ctx.save(); ctx.fillStyle="rgba(255,255,255,.035)"; rr(r.x,r.y,r.w,r.h,12); ctx.fill();
+  ctx.save(); ctx.fillStyle=fondAnime()?"rgba(4,14,22,.5)":"rgba(255,255,255,.035)";
+  rr(r.x,r.y,r.w,r.h,12); ctx.fill();
   ctx.strokeStyle="rgba(217,164,65,.18)"; ctx.stroke(); ctx.restore();
   text("JOURNAL DE BORD", r.x+12, r.y+S.u*1.1, clamp(S.u*.6,8,12),{col:"rgba(234,215,173,.5)",w:"700",ls:1.5});
   const fs=clamp(S.u*.66,9,13);
@@ -1302,7 +1395,7 @@ function press(p){
   for(const b of bs){ if(hit(b,p)){ if(b.on){ SFX.click(); action(b.id); } return; } }
   if(S.phase==="choose" && isHuman() && !S.island){
     for(const d of S.dice){
-      if(d.zone!=="table"||d.virtual) continue;
+      if(d.virtual || (d.zone!=="table" && !(d.zone==="chest" && card().id==="chest"))) continue;
       const s=d.size;
       if(p.x>d.x-s/2-4&&p.x<d.x+s/2+4&&p.y>d.y-s/2-4&&p.y<d.y+s/2+4){ d.sel=!d.sel; SFX.click(); return; }
     }
@@ -1315,13 +1408,22 @@ function action(id){
     case "ai1": S.nAI=1; break;
     case "ai2": S.nAI=2; break;
     case "ai3": S.nAI=3; break;
+    case "video": basculeVideo(); break;
     case "rules": S.prev=S.phase; S.phase="rules"; break;
     case "back": S.phase=S.prev||"menu"; break;
     case "menu": S.phase="menu"; S.players=[]; S.dice=[]; break;
     case "first": rollDice(realTable()); break;
     case "roll":
       if(S.island){ tableDice().forEach(d=>{if(!d.virtual)d.sel=true;}); rollDice(realTable()); }
-      else rollDice(S.dice.filter(d=>d.zone==="table"&&!d.virtual&&d.sel));
+      else{
+        const sel=rerollable().filter(d=>d.sel);
+        const sortis=sel.filter(d=>d.zone==="chest");
+        if(sortis.length){
+          sortis.forEach(d=>d.zone="table");
+          say("Vous ressortez "+sortis.length+" dé"+(sortis.length>1?"s":"")+" du coffre.", C.parch2);
+        }
+        rollDice(sel);
+      }
       break;
     case "bank": resolve(); break;
     case "all": {
@@ -1346,7 +1448,7 @@ cv.addEventListener("pointermove",e=>{
   const p=at(e); S.hover=null;
   for(const b of btnRects(L.btnList)) if(hit(b,p)&&b.on){ S.hover=b.id; break; }
   if(!S.hover && S.phase==="choose" && isHuman()){
-    S.dice.forEach((d,i)=>{ if(d.zone==="table"&&!d.virtual){
+    S.dice.forEach((d,i)=>{ if((d.zone==="table"||d.zone==="chest")&&!d.virtual){
       const s=d.size;
       if(p.x>d.x-s/2&&p.x<d.x+s/2&&p.y>d.y-s/2&&p.y<d.y+s/2) S.hover="die"+i;
     }});
@@ -1360,10 +1462,12 @@ window.addEventListener("keydown",e=>{
     if(b){ SFX.click(); action(b.id); }
   }
   if(e.key==="m"||e.key==="M") muted=!muted;
+  if(e.key==="v"||e.key==="V") basculeVideo();
 });
 
 /* ------------------------------ DÉMARRAGE -------------------------------- */
 resize();
+initVideo();
 loadAll(()=>{
   document.getElementById("boot").style.display="none";
   buildDeck();
