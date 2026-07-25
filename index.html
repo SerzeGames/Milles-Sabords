@@ -21,6 +21,10 @@
 </style>
 </head>
 <body>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<input id="nick" maxlength="16" placeholder="Votre nom de pirate" autocomplete="off"
+  style="position:fixed;z-index:5;display:none;border:2px solid #d9a441;background:rgba(6,20,30,.95);
+  color:#f4efe3;font:600 16px 'Trebuchet MS',sans-serif;text-align:center;border-radius:10px;outline:none">
 <video id="bgv" muted loop playsinline autoplay preload="auto" disablepictureinpicture></video>
 <canvas id="game"></canvas>
 <div id="sat"></div><div id="sab"></div>
@@ -35,7 +39,7 @@
 /* ------------------------------ CONFIG ---------------------------------- */
 const DIR = "images/";
 const VIDEO_FOND = "video/pirate.mp4";   // "" pour se passer de la vidéo de fond
-const VOILE      = .0                  // opacité du voile sombre posé sur la vidéo
+const VOILE      = .76;                  // opacité du voile sombre posé sur la vidéo
 const SRC = { sheet: DIR+"spritesheet.png", dice: DIR+"dice.png", back: DIR+"BackCard.png" };
 
 const TARGET        = 6000;   // seuil qui déclenche le dernier tour
@@ -246,6 +250,308 @@ function drawFace(f,cx,cy,s){
   else { ctx.fillStyle="#eee"; rr(cx-s/2,cy-s/2,s,s,s*.18); ctx.fill(); }
 }
 
+/* ============================== RÉSEAU ==================================== */
+/* Modèle hôte-autoritaire : l'hôte fait tourner toute la logique (dés, cartes,
+   IA, score) et diffuse l'état complet ; les invités affichent cet état et
+   n'envoient que des intentions (« relance ces dés », « encaisse », …).       */
+const NET = {
+  role:"local",            // local | host | guest
+  peer:null, id:null,
+  conns:[],                // hôte : connexions vers les invités
+  host:null,               // invité : connexion vers l'hôte
+  seat:0,                  // siège de CE client dans S.players
+  name:"",                 // pseudo choisi
+  status:"", room:"",
+  lastSent:0, dirty:false,
+  matchTimer:0, tries:0
+};
+const ROOM_PREFIX = "millesabords-v1-";   // espace de noms PeerJS partagé
+const MAX_PLAYERS = 4;
+
+function online(){ return NET.role!=="local"; }
+function isHost(){ return NET.role==="host"; }
+function myTurn(){ return online() ? S.cur===NET.seat : true; }
+
+function randRoom(){ return ROOM_PREFIX+Math.random().toString(36).slice(2,7); }
+function netSay(t){ NET.status=t; }
+
+/* --- démarrage d'une recherche de partie rapide --- */
+function quickPlay(name){
+  NET.name=name||("Corsaire"+(1+ri(999)));
+  NET.role="guest"; NET.status="Recherche d'une partie…"; NET.tries=0;
+  S.phase="lobby";
+  tryJoin();
+}
+function tryJoin(){
+  NET.tries++;
+  connectFlow();
+}
+/* Matchmaking robuste : on tente d'abord de REJOINDRE l'hôte du salon d'accueil ;
+   si personne n'y répond, on tente de DEVENIR cet hôte ; en cas de collision
+   (deux clients s'y essaient en même temps), le perdant re-tente de rejoindre.  */
+const LOBBY_ID = ROOM_PREFIX+"lobby";
+function connectFlow(){
+  if(S.phase!=="lobby") return;
+  netSay("Recherche d'une partie…");
+  // 1) tenter de se connecter à un hôte déjà présent
+  const probe=new Peer(null,{debug:0});
+  let done=false;
+  probe.on("open",()=>{
+    NET.peer=probe;
+    const conn=probe.connect(LOBBY_ID,{reliable:true});
+    let ouvert=false;
+    const fallback=()=>{
+      if(done) return; done=true;
+      try{ conn.close(); }catch(_){}
+      try{ probe.destroy(); }catch(_){}
+      NET.peer=null; claimHost();
+    };
+    conn.on("open",()=>{ ouvert=true; done=true; NET.host=conn; conn.send({t:"name",name:NET.name}); netSay("Partie trouvée, connexion…"); });
+    conn.on("data",d=>guestOnData(d));
+    conn.on("close",()=>{ if(ouvert) guestLost(); });
+    conn.on("error",()=>{ if(!ouvert) fallback(); });   // aucun hôte à cette adresse → devenir hôte
+    setTimeout(fallback, 2500);                          // filet de sécurité
+  });
+  probe.on("error",()=>{ if(!done){ try{probe.destroy();}catch(_){}; setTimeout(claimHost,300); } });
+}
+/* Essayer de réserver l'ID d'accueil pour devenir hôte. */
+function claimHost(){
+  if(S.phase!=="lobby") return;
+  netSay("Ouverture d'un salon…");
+  const p=new Peer(LOBBY_ID,{debug:0});
+  p.on("open",()=>{ NET.peer=p; startHosting(p,LOBBY_ID); });
+  p.on("error",e=>{
+    try{ p.destroy(); }catch(_){}
+    NET.peer=null;
+    if(e.type==="unavailable-id"){
+      // quelqu'un vient de prendre la place d'hôte → on re-tente de rejoindre
+      setTimeout(()=>{ if(S.phase==="lobby") connectFlow(); }, 300+ri(400));
+    }else{
+      netSay("Connexion difficile, nouvel essai…");
+      setTimeout(()=>{ if(S.phase==="lobby") connectFlow(); }, 1000);
+    }
+  });
+}
+function wireGuest(conn){ /* placeholder : câblage fait dans connectFlow */ }
+
+/* ---- côté HÔTE ---- */
+/* ---- côté HÔTE ---- */
+function startHosting(peer,room){
+  NET.role="host"; NET.room=room; NET.seat=0;
+  S.players=[{name:NET.name, score:0, disp:0, ai:false, online:true, seat:0}];
+  netSay("Salon ouvert. En attente de joueurs…");
+  peer.on("connection",conn=>{
+    conn.on("open",()=>{
+      if(S.phase!=="lobby" || S.players.length>=MAX_PLAYERS){
+        conn.send({t:"full"}); setTimeout(()=>{try{conn.close();}catch(_){}} ,300); return;
+      }
+      const seat=S.players.length;
+      S.players.push({name:"Corsaire", score:0, disp:0, ai:false, online:true, seat, conn});
+      NET.conns.push(conn);
+      conn.send({t:"welcome", seat, you:seat});
+      broadcastLobby();
+    });
+    conn.on("data",d=>hostOnData(conn,d));
+    conn.on("close",()=>hostDropConn(conn));
+    conn.on("error",()=>hostDropConn(conn));
+  });
+}
+function hostSeatOf(conn){ const p=S.players.find(x=>x.conn===conn); return p?p.seat:-1; }
+function hostDropConn(conn){
+  NET.conns=NET.conns.filter(c=>c!==conn);
+  const p=S.players.find(x=>x.conn===conn);
+  if(!p) return;
+  if(S.phase==="lobby"){
+    S.players=S.players.filter(x=>x!==conn && x.conn!==conn);
+    S.players.forEach((q,i)=>{ q.seat=i; if(q.conn) q.conn.send({t:"welcome",seat:i,you:i}); });
+    broadcastLobby();
+  }else{
+    // en pleine partie : le siège est repris par l'IA pour ne pas bloquer
+    if(!p.ai){ p.name=p.name+" (IA)"; say(p.name+" a quitté — repris par l'ordinateur.", C.rust); }
+    p.online=false; p.ai=true; p.conn=null;
+    if(S.cur===p.seat && S.phase!=="over") scheduleHostAI();
+    broadcastState();
+  }
+}
+function broadcastLobby(){
+  const roster=S.players.map(p=>({name:p.name, seat:p.seat, ai:!!p.ai}));
+  NET.conns.forEach(c=>{ try{ c.send({t:"lobby", roster, host:0, canStart:S.players.length>=2}); }catch(_){} });
+}
+function broadcastState(){
+  if(!isHost()) return;
+  const snap=snapshot();
+  NET.conns.forEach(c=>{ try{ c.send({t:"state", s:snap}); }catch(_){} });
+}
+function hostOnData(conn,d){
+  const seat=hostSeatOf(conn);
+  if(d.t==="name"){
+    const p=S.players.find(x=>x.conn===conn); if(p){ p.name=(""+d.name).slice(0,16)||("Corsaire"+seat); broadcastLobby(); }
+    return;
+  }
+  if(d.t==="chat"){ pushChat(seat,d.m); broadcastChat(seat,d.m); return; }
+  if(d.t==="intent") hostIntent(seat,d);
+}
+/* Toute intention d'un invité n'est exécutée que si c'est bien son tour. */
+function hostIntent(seat,d){
+  if(S.phase==="lobby"){
+    if(d.a==="start" && seat===0){ hostStart(); }
+    return;
+  }
+  if(seat!==S.cur) return;                 // sécurité : jamais hors de son tour
+  applyIntent(d);
+  broadcastState();
+}
+function hostStart(){
+  // on complète éventuellement avec des IA jusqu'à 2 joueurs minimum ? Non :
+  // la partie rapide démarre avec les humains présents (2 à 4).
+  buildDeck(); S.log=[]; S.lastRound=false; S.endAt=-1;
+  S.players.forEach(p=>{ p.score=0; p.disp=0; });
+  S.cur=S.players.length-1;
+  NET.conns.forEach(c=>{ try{ c.send({t:"begin"}); }catch(_){} });
+  startTurn(); broadcastState();
+}
+
+/* ---- côté INVITÉ ---- */
+function becomeAloneHost(){
+  try{ if(NET.peer) NET.peer.destroy(); }catch(_){}
+  NET.peer=null; NET.host=null; NET.conns=[];
+  setTimeout(connectFlow, 300+ri(400));
+}
+function guestLost(){
+  if(S.phase==="over") return;
+  netSay("Connexion perdue avec l'hôte.");
+  NET.role="local";
+  S.banner={txt:"Hôte déconnecté — partie terminée", t:S.t+4, col:C.rust};
+  S.phase="menu"; S.players=[]; S.dice=[];
+}
+function guestOnData(d){
+  switch(d.t){
+    case "welcome": NET.seat=d.you; break;
+    case "full": netSay("Partie complète — on cherche ailleurs…"); becomeAloneHost(); break;
+    case "lobby": S.lobby=d.roster; S.canStart=false; break;   // seul l'hôte lance
+    case "begin": S.phase="play"; break;
+    case "state": applySnapshot(d.s); break;
+    case "chat": pushChat(d.seat,d.m); break;
+  }
+}
+function guestSend(o){ if(NET.host){ try{ NET.host.send(o); }catch(_){} } }
+
+/* ---- envoi d'une intention (depuis n'importe quel client) ---- */
+function sendIntent(o){
+  if(isHost()){
+    if(o.a==="start"){ if(S.phase==="lobby") hostStart(); return; }
+    applyIntent(o); broadcastState();
+  }
+  else guestSend(Object.assign({t:"intent"},o));
+}
+
+/* ---- chat léger ---- */
+function pushChat(seat,m){
+  const name=(S.players[seat]&&S.players[seat].name)||(S.lobby&&S.lobby[seat]&&S.lobby[seat].name)||"?";
+  say("💬 "+name+" : "+(""+m).slice(0,80), C.jade);
+}
+function broadcastChat(seat,m){ NET.conns.forEach(c=>{ try{ c.send({t:"chat",seat,m}); }catch(_){} }); }
+function sendChat(m){
+  if(isHost()){ pushChat(NET.seat,m); broadcastChat(NET.seat,m); }
+  else { pushChat(NET.seat,m); guestSend({t:"chat",m}); }
+}
+
+/* ============ SÉRIALISATION DE L'ÉTAT (hôte → invités) ============ */
+function snapshot(){
+  return {
+    phase:S.phase, cur:S.cur, card:S.card,
+    flip:{mode:S.flip.mode, t:+S.flip.t.toFixed(3), dur:S.flip.dur},
+    dice:S.dice.map(d=>({f:d.face, z:d.zone, v:d.virtual?1:0, s:d.sel?1:0})),
+    rolls:S.rolls, island:S.island?1:0, witch:S.witchUsed?1:0,
+    last:S.lastRound?1:0, endAt:S.endAt,
+    players:S.players.map(p=>({n:p.name, sc:p.score, ai:p.ai?1:0, on:p.online?1:0, seat:p.seat})),
+    log:S.log.slice(0,14).map(e=>({m:e.m, c:e.c})),
+    pop:S.pop.map(x=>({txt:x.txt, sub:x.sub||"", col:x.col, t:+(x.t-S.t).toFixed(2), life:x.life})),
+    banner:S.banner?{txt:S.banner.txt, dt:+(S.banner.t-S.t).toFixed(2), col:S.banner.col}:null,
+    resolveIn:+(S.resolveUntil-S.t).toFixed(2),
+    winners:S.winners?S.winners.map(w=>w.seat):null,
+    tSent:S.t
+  };
+}
+function applySnapshot(s){
+  const anim = S.snap;               // ancien instantané pour animer les dés
+  S.phase=s.phase; S.cur=s.cur; S.card=s.card;
+  // ne pas casser une animation de retournement locale déjà en cours
+  if(!(S.flip.mode==="reveal"||S.flip.mode==="hide") || s.flip.mode!==S.flip.mode)
+    S.flip={mode:s.flip.mode, t:s.flip.t, dur:s.flip.dur};
+  S.rolls=s.rolls; S.island=!!s.island; S.witchUsed=!!s.witch;
+  S.lastRound=!!s.last; S.endAt=s.endAt;
+  S.players=s.players.map(p=>{
+    const old=S.players.find(o=>o.seat===p.seat);
+    return {name:p.n, score:p.sc, disp:old?old.disp:p.sc, ai:!!p.ai, online:!!p.on, seat:p.seat};
+  });
+  // dés : on conserve les positions écran pour l'interpolation, on relance les anims
+  const anciens=S.dice;
+  S.dice=s.dice.map((d,i)=>{
+    const o=anciens[i]||{};
+    // une animation ne survit que sur un dé toujours posé sur la table
+    const garde = o.anim && d.z==="table" && o.zone==="table";
+    const die={face:d.f, zone:d.z, virtual:!!d.v, sel:!!d.s,
+      x:o.x!==undefined?o.x:W/2, y:o.y!==undefined?o.y:H/2,
+      tx:o.tx!==undefined?o.tx:W/2, ty:o.ty!==undefined?o.ty:H/2,
+      size:o.size||40, rot:garde?o.rot:0, sc:garde?o.sc:1, anim:garde?o.anim:null};
+    if(die.anim) die.anim.final=d.f;     // la face finale suit toujours l'hôte
+    return die;
+  });
+  // rejouer une animation de lancer si l'hôte vient d'en déclencher une
+  if(s.phase==="roll" && (!anim || anim.rolls!==s.rolls)) startGuestRollAnim();
+  S.log=s.log.map(e=>({m:e.m, c:e.c}));
+  S.pop=s.pop.map(x=>({txt:x.txt, sub:x.sub, col:x.col, t:S.t+x.t, life:x.life}));
+  S.banner=s.banner?{txt:s.banner.txt, t:S.t+s.banner.dt, col:s.banner.col}:null;
+  S.resolveUntil=S.t+s.resolveIn;
+  if(s.phase==="over" && s.winners) S.winners=s.winners.map(seat=>S.players.find(p=>p.seat===seat)).filter(Boolean);
+  S.snap={rolls:s.rolls, phase:s.phase};
+}
+/* Invité : rejoue l'animation de dés qui roulent (purement visuel) */
+function startGuestRollAnim(){
+  SFX.roll();
+  let i=0;
+  S.dice.forEach(d=>{
+    if(d.zone==="table"){ d.anim={t:0,dur:.5,delay:(i++)*.045,final:d.face,flick:0}; }
+  });
+}
+
+/* ============ APPLICATION D'UNE INTENTION (hôte seulement) ============ */
+function applyIntent(d){
+  const c=card();
+  switch(d.a){
+    case "first": if(S.phase==="card" && S.flip.mode===null) rollDice(realTable()); break;
+    case "sel": {
+      // d.k = index de dé à basculer (sélection)
+      const die=S.dice[d.k];
+      if(die && !die.virtual && S.phase==="choose" && !S.island &&
+         (die.zone==="table" || (die.zone==="chest" && c.id==="chest"))) die.sel=!die.sel;
+      break;
+    }
+    case "all": { const rt=realTable(), all=rt.every(x=>x.sel); rt.forEach(x=>x.sel=!all); break; }
+    case "roll": {
+      if(S.phase!=="choose") break;
+      if(S.island){ tableDice().forEach(x=>{if(!x.virtual)x.sel=true;}); rollDice(realTable()); break; }
+      const sel=rerollable().filter(x=>x.sel);
+      const sortis=sel.filter(x=>x.zone==="chest");
+      if(sortis.length){ sortis.forEach(x=>x.zone="table");
+        say("Dés ressortis du coffre : "+sortis.length, C.parch2); }
+      if(sel.length>=2) rollDice(sel);
+      break;
+    }
+    case "chest": {
+      const sel=S.dice.filter(x=>x.zone==="table"&&!x.virtual&&x.sel);
+      sel.forEach(x=>{ x.zone="chest"; x.sel=false; });
+      if(sel.length) say((P().name)+" met "+sel.length+" dé"+(sel.length>1?"s":"")+" au coffre.", C.parch2);
+      if(stuck()) resolve();
+      break;
+    }
+    case "witch": if(c.id==="witch" && !S.witchUsed && realSkulls().length) useWitch(); break;
+    case "bank": if(S.phase==="choose"){ const sc=turnScore(); if(sc.total>0 && !sc.battleFail) resolve(); } break;
+    case "skip": if(S.phase==="resolve") S.resolveUntil=Math.min(S.resolveUntil,S.t+.12); break;
+  }
+}
+
 /* ------------------------------- ÉTAT ------------------------------------ */
 const S = {
   phase:"menu",          // menu | rules | card | roll | choose | resolve | over
@@ -290,8 +596,10 @@ function nextTurn(){
   // le tour est revenu au joueur qui a franchi le seuil : tout le monde a joué
   if(S.lastRound && S.cur===S.endAt){ gameOver(); return; }
   startTurn();
+  if(online() && isHost()) scheduleHostAI();   // siège vide repris par l'IA
 }
 function startTurn(){
+  if(online() && !isHost()) return;      // seul l'hôte pilote le déroulé
   if(!S.deck.length) buildDeck();
   S.card = S.deck.pop();
   S.dice=[]; S.rolls=0; S.island=false; S.newSkulls=0; S.witchUsed=false;
@@ -304,8 +612,10 @@ function startTurn(){
   if(c.id==="diam")   addVirtual(DIAM,"table",1);
   if(c.id==="coin")   addVirtual(COIN,"table",1);
 
-  S.phase="card"; S.flip={mode:"reveal",t:0,dur:.55}; SFX.card();
-  say((P().ai?P().name:"Vous")+" — carte "+c.n, P().ai?C.parch2:C.brass);
+  S.phase="card"; S.flip={mode:"reveal",t:0,dur:.55}; if(!online()||isHost()) SFX.card();
+  const qui = online()? P().name : (P().ai?P().name:"Vous");
+  say(qui+" — carte "+c.n, P().ai?C.parch2:C.brass);
+  broadcastState();
 }
 function mkDie(face,zone){
   return {face, zone, sel:false, virtual:false, x:W/2, y:H/2, tx:W/2, ty:H/2,
@@ -319,14 +629,15 @@ function addVirtual(face,zone,n){
 function rollDice(list){
   if(!list.length) return;
   S.rolls++;
-  S.phase="roll"; SFX.roll();
+  S.phase="roll"; if(!online()||isHost()) SFX.roll();
   list.forEach((d,i)=>{
     d.sel=false;
     d.anim={t:0, dur:.5+rnd(.18), delay:i*.045, final:ri(6), flick:0};
   });
   S.pendingAfterRoll=true;
+  broadcastState();
 }
-function afterRoll(){
+function afterRollCore(){
   const before = skulls();
   let got=0;
   realTable().forEach(d=>{ if(d.face===SKULL){ d.zone="skull"; got++; } });
@@ -372,6 +683,10 @@ function stuck(){
   const sc=turnScore();
   return sc.total<=0 || sc.battleFail;
 }
+function afterRoll(){
+  afterRollCore();
+  broadcastState();        // hôte : publier l'état résultant du lancer (choose/resolve/île…)
+}
 function useWitch(){
   const d = realSkulls()[0];
   if(!d) return;
@@ -379,7 +694,8 @@ function useWitch(){
   say("La Sorcière relance une tête de mort.", C.jade);
   S.phase="roll";
   d.anim={t:0,dur:.55,delay:0,final:ri(6),flick:0};  // ne compte pas comme un lancer
-  S.pendingAfterRoll=true; SFX.roll();
+  S.pendingAfterRoll=true; if(!online()||isHost()) SFX.roll();
+  broadcastState();
 }
 
 /* ------------------------------ SCORE ------------------------------------ */
@@ -502,12 +818,14 @@ function resolve(){
   }
   S.flip={mode:"hide",t:0,dur:.55};        // la carte du tour se retourne face cachée
   S.resolveUntil = S.t + (r.total>0?1.55:1.9);
+  broadcastState();
 }
 function gameOver(){
   S.phase="over";
   const best=Math.max(...S.players.map(p=>p.score));
   S.winners=S.players.filter(p=>p.score===best);
   SFX.good();
+  broadcastState();
 }
 
 /* Présélection : on propose les dés inutiles, sauf quand le risque devient réel */
@@ -849,26 +1167,43 @@ function placeDice(){
 
 /* ------------------------------ BOUTONS ---------------------------------- */
 function isHuman(){ const p=S.players[S.cur]; return p && !p.ai; }
+// « à moi de jouer » pour l'affichage des boutons d'action
+function myControls(){ return online() ? (S.cur===NET.seat && !P().ai) : isHuman(); }
+function scheduleHostAI(){ if(isHost() && P() && P().ai) S.aiAt=S.t+.8; }
 function buttons(){
   const b=[];
   if(S.phase==="menu"){
-    b.push({id:"play",  l:"Nouvelle partie", k:"gold", on:true, row:0});
-    b.push({id:"rules", l:"Règles", k:"ghost", on:true, row:0});
-    if(VIDEO_FOND) b.push({id:"video", l:VIDEO_ON?"Fond vidéo ✓":"Fond vidéo ✕",
-                           k:VIDEO_ON?"sel":"ghost", on:true, row:0});
+    b.push({id:"play",  l:"Jouer hors-ligne", k:"gold", on:true, row:0});
+    b.push({id:"online",l:"Multijoueur en ligne", k:"green", on:!!window.Peer, row:0});
     b.push({id:"ai1",   l:"1 adversaire",  k:S.nAI===1?"sel":"ghost", on:true, row:1});
     b.push({id:"ai2",   l:"2 adversaires", k:S.nAI===2?"sel":"ghost", on:true, row:1});
     b.push({id:"ai3",   l:"3 adversaires", k:S.nAI===3?"sel":"ghost", on:true, row:1});
+    b.push({id:"rules", l:"Règles", k:"ghost", on:true, row:2});
+    if(VIDEO_FOND) b.push({id:"video", l:VIDEO_ON?"Fond vidéo ✓":"Fond vidéo ✕",
+                           k:VIDEO_ON?"sel":"ghost", on:true, row:2});
     return b;
   }
   if(S.phase==="rules"){ b.push({id:"back",l:"Retour",k:"gold",on:true}); return b; }
-  if(S.phase==="over"){ b.push({id:"menu",l:"Rejouer",k:"gold",on:true}); return b; }
+  if(S.phase==="nick"){
+    b.push({id:"go",l:"Chercher une partie",k:"gold",on:true,row:0});
+    b.push({id:"cancel",l:"Retour",k:"ghost",on:true,row:0});
+    return b;
+  }
+  if(S.phase==="lobby"){
+    if(isHost() && (S.players.length>=2)) b.push({id:"start",l:"Démarrer la partie",k:"gold",on:true,row:0});
+    b.push({id:"cancel",l:"Quitter",k:"ghost",on:true,row:0});
+    return b;
+  }
+  if(S.phase==="over"){
+    b.push({id: online()?"leave":"menu", l:"Rejouer", k:"gold", on:true});
+    return b;
+  }
   if(S.phase==="card"){
-    if(isHuman()) b.push({id:"first",l:L.compact?"Lancer les dés":"Lancer les 8 dés",k:"gold",on:S.flip.mode===null});
+    if(myControls()) b.push({id:"first",l:L.compact?"Lancer les dés":"Lancer les 8 dés",k:"gold",on:S.flip.mode===null});
     return b;
   }
   if(S.phase==="resolve") return b;
-  if(S.phase==="choose" && isHuman()){
+  if(S.phase==="choose" && myControls()){
     const c=card(), sel=selCount(), sk=skulls(), sc=turnScore();
     if(sk>=3 && c.id==="witch" && !S.witchUsed){
       b.push({id:"witch",l:L.compact?"Sorcière : relancer un crâne":"Sorcière : relancer une tête de mort",k:"gold",on:true});
@@ -1092,7 +1427,9 @@ function drawHead(){
   scrim(r,.4);
   const sk=skulls();
   const fs=clamp(r.h*.52,12,26), fmin=L.compact?11:9;
-  let label = S.island ? (L.compact?"ÎLE DES CRÂNES":"ÎLE DE LA TÊTE-DE-MORT") : (P().ai? P().name.toUpperCase() : "VOTRE TOUR");
+  let label = S.island ? (L.compact?"ÎLE DES CRÂNES":"ÎLE DE LA TÊTE-DE-MORT")
+             : online() ? (S.cur===NET.seat ? "À VOUS DE JOUER" : (P().name+"…").toUpperCase())
+             : (P().ai? P().name.toUpperCase() : "VOTRE TOUR");
   text(label, r.x, r.y+r.h*.34, clamp(r.h*.3,fmin,14), {col:S.island?C.rust:"rgba(234,215,173,.6)",w:"700",ls:1.4});
   const risque = sc.battleFail && (!S.island || c.id==="peace");
   text(S.island&&!risque? skulls()+" têtes de mort" : (risque? "−"+sc.malus+" pts" : sc.total+" pts"),
@@ -1109,6 +1446,7 @@ function drawHead(){
   if(c.id==="storm") info.push({t:"Lancer "+Math.max(1,S.rolls)+"/2", c:C.parch2});
   if(c.id==="witch") info.push({t:S.witchUsed?"Sorcière utilisée":"Sorcière prête", c:S.witchUsed?"rgba(234,215,173,.45)":C.jade});
   if(S.lastRound) info.push({t:"Dernier tour", c:C.brass});
+  if(online() && S.cur!==NET.seat) info.push({t:"Tour adverse", c:"rgba(234,215,173,.6)"});
   let x=r.x+r.w;
   info.reverse().forEach(o=>{
     const s=clamp(r.h*.32,fmin,15); ctx.font="700 "+s+"px "+UI;
@@ -1189,7 +1527,7 @@ function drawMenu(){
   const cx=W/2;
   const t=clamp(Math.min(W/11,H/9),22,74);
   text("MILLE SABORDS", cx, H*(PORTRAIT?.16:.2), t, {col:C.brass,al:"center",font:DISPLAY,w:"700",ls:t*.1,sh:2});
-  text("Jeu de dés pirate — premier à "+TARGET+" points", cx, H*(PORTRAIT?.22:.28), clamp(t*.26,10,18),
+  text("Jeu de dés pirate — solo ou multijoueur en ligne", cx, H*(PORTRAIT?.22:.28), clamp(t*.26,10,18),
        {col:"rgba(234,215,173,.7)",al:"center",w:"500"});
   // éventail : dos de carte + trois dés
   const ch=clamp(H*.30,120,270), cw=ch*(CARD_SW/CARD_SH);
@@ -1207,6 +1545,52 @@ function drawMenu(){
     const bob=Math.sin(S.t*1.6+i*.7)*3;
     drawFace(f,gx,y+ch+ds*.9+bob,ds);
   });
+}
+function drawNick(){
+  const cx=W/2;
+  const t=clamp(Math.min(W/13,H/11),18,46);
+  text("MULTIJOUEUR", cx, H*.24, t, {col:C.brass,al:"center",font:DISPLAY,w:"700",ls:t*.08,sh:2});
+  text("Partie rapide — 2 à 4 pirates en ligne", cx, H*.31, clamp(t*.32,11,17),
+       {col:"rgba(234,215,173,.75)",al:"center",w:"500"});
+  text("Entrez votre nom, puis lancez la recherche.", cx, H*.365, clamp(t*.3,10,15),
+       {col:"rgba(234,215,173,.55)",al:"center",w:"500"});
+  positionNick();
+  text("Une partie disponible vous accueille ; sinon vous en ouvrez une.", cx, H*.56,
+       clamp(t*.28,10,14), {col:"rgba(234,215,173,.45)",al:"center",w:"500"});
+}
+function seatColor(i){ return i===0?BAR_ME:(BAR_AI[(i-1)%BAR_AI.length]); }
+function drawLobby(){
+  const cx=W/2;
+  const t=clamp(Math.min(W/13,H/12),16,40);
+  text("SALON", cx, H*.15, t, {col:C.brass,al:"center",font:DISPLAY,w:"700",ls:t*.1});
+  const ros = isHost() ? S.players.map(p=>({name:p.name,seat:p.seat,ai:p.ai})) : (S.lobby||[]);
+  text(NET.status||"", cx, H*.22, clamp(t*.34,10,16), {col:"rgba(234,215,173,.7)",al:"center",w:"600"});
+  const n=Math.max(ros.length,1);
+  const cw=clamp(W*.6,220,460), rh=clamp(H*.08,42,64), x=cx-cw/2;
+  let y=H*.3;
+  for(let i=0;i<MAX_PLAYERS;i++){
+    const p=ros[i];
+    ctx.save();
+    ctx.fillStyle=p?"rgba(255,255,255,.06)":"rgba(255,255,255,.02)";
+    rr(x,y,cw,rh,10); ctx.fill();
+    if(p){ const c=seatColor(p.seat); ctx.fillStyle=c.hi; rr(x,y,6,rh,3); ctx.fill(); }
+    ctx.strokeStyle="rgba(217,164,65,.2)"; ctx.lineWidth=1.2; rr(x,y,cw,rh,10); ctx.stroke();
+    ctx.restore();
+    const fs=clamp(rh*.4,12,20);
+    if(p){
+      const moi = online() && p.seat===NET.seat;
+      text(p.name+(moi?" (vous)":"")+(p.ai?" — IA":""), x+18, y+rh/2, fs,
+           {col:moi?"#fff":C.parch, w:"700"});
+      if(p.seat===0) text("HÔTE", x+cw-16, y+rh/2, clamp(fs*.7,9,13), {col:C.brass,al:"right",w:"700",ls:1});
+    }else{
+      text("En attente…", x+18, y+rh/2, fs, {col:"rgba(234,215,173,.35)", w:"500"});
+    }
+    y+=rh+8;
+  }
+  const info = isHost()
+     ? (ros.length>=2 ? "Vous pouvez démarrer quand vous voulez." : "En attente d'au moins un autre joueur…")
+     : "En attente que l'hôte lance la partie…";
+  text(info, cx, y+rh*.3, clamp(t*.3,10,15), {col:"rgba(234,215,173,.6)",al:"center",w:"500"});
 }
 function drawRules(){
   const w=clamp(W*.86,260,760), x=(W-w)/2, y=L.top.h+S.u*1.2, h=L.btn.y-y-S.u;
@@ -1304,12 +1688,13 @@ function update(dt){
     if(Math.abs(d)<1) p.disp=p.score;
     else p.disp+=Math.sign(d)*Math.min(Math.abs(d), Math.max(900, Math.abs(d)*3.2)*dt);
   });
-  if(S.phase==="card" && S.flip.mode===null){
+  const pilote = !online() || isHost();     // qui fait avancer la partie
+  if(pilote && S.phase==="card" && S.flip.mode===null){
     if(P().ai && !S.aiAt) S.aiAt=S.t+.45;
     if(P().ai && S.t>S.aiAt){ S.aiAt=0; rollDice(realTable()); }
   }
   // fin de tour : on laisse le temps de lire, puis la carte suivante se retourne
-  if(S.phase==="resolve" && S.t>S.resolveUntil) nextTurn();
+  if(pilote && S.phase==="resolve" && S.t>S.resolveUntil) nextTurn();
   // animations de dés
   let rolling=false;
   S.dice.forEach(d=>{
@@ -1333,7 +1718,7 @@ function update(dt){
   if(S.pendingAfterRoll && !rolling){ S.pendingAfterRoll=false; afterRoll(); }
   // IA
   const pl=S.players[S.cur];
-  if(pl && pl.ai && S.phase==="choose"){
+  if(pilote && pl && pl.ai && S.phase==="choose"){
     if(!S.aiAt) S.aiAt=S.t+.8;                       // jamais de tour d'IA figé
     else if(S.t>S.aiAt){ S.aiAt=0; aiAct(); }
   }
@@ -1342,6 +1727,8 @@ function render(){
   ctx.clearRect(0,0,W,H);
   bg();
   if(S.phase==="menu"){ drawTop(); drawMenu(); }
+  else if(S.phase==="nick"){ drawTop(); drawNick(); }
+  else if(S.phase==="lobby"){ drawTop(); drawLobby(); }
   else if(S.phase==="rules"){ drawTop(); drawRules(); }
   else{
     drawCardPanel();
@@ -1370,6 +1757,25 @@ function loop(){
 }
 
 /* ------------------------------ ENTRÉES ---------------------------------- */
+const nickEl=document.getElementById("nick");
+function showNick(){
+  if(!nickEl) return;
+  nickEl.style.display="block";
+  if(!nickEl.value) nickEl.value = NET.name || ("Corsaire"+(1+ri(99)));
+  positionNick(); setTimeout(()=>{ nickEl.focus(); nickEl.select(); },30);
+}
+function hideNick(){ if(nickEl){ nickEl.blur(); nickEl.style.display="none"; } }
+function positionNick(){
+  if(!nickEl || nickEl.style.display==="none") return;
+  const w=Math.min(W*0.7,360), h=clamp(H*0.07,42,60);
+  nickEl.style.left=(W/2-w/2)+"px";
+  nickEl.style.top =(H*0.42)+"px";
+  nickEl.style.width=w+"px"; nickEl.style.height=h+"px";
+  nickEl.style.fontSize=clamp(h*0.4,14,22)+"px";
+}
+if(nickEl) nickEl.addEventListener("keydown",e=>{
+  if(e.key==="Enter"){ const n=nickEl.value.trim(); hideNick(); quickPlay(n); }
+});
 const SAFE={t:0,b:0};
 function resize(){
   const st=document.getElementById("sat"), sb=document.getElementById("sab");
@@ -1380,8 +1786,8 @@ function resize(){
   ctx.setTransform(DPR,0,0,DPR,0,0);
   layout();
 }
-window.addEventListener("resize",resize);
-window.addEventListener("orientationchange",()=>setTimeout(resize,120));
+window.addEventListener("resize",()=>{ resize(); positionNick(); });
+window.addEventListener("orientationchange",()=>setTimeout(()=>{resize();positionNick();},120));
 
 function at(e){
   const r=cv.getBoundingClientRect();
@@ -1393,22 +1799,47 @@ function hit(b,p){ return p.x>=b.x&&p.x<=b.x+b.w&&p.y>=b.y&&p.y<=b.y+b.h; }
 function press(p){
   const bs=btnRects(L.btnList);
   for(const b of bs){ if(hit(b,p)){ if(b.on){ SFX.click(); action(b.id); } return; } }
-  if(S.phase==="choose" && isHuman() && !S.island){
-    for(const d of S.dice){
+  if(S.phase==="choose" && myControls() && !S.island){
+    for(let i=0;i<S.dice.length;i++){
+      const d=S.dice[i];
       if(d.virtual || (d.zone!=="table" && !(d.zone==="chest" && card().id==="chest"))) continue;
       const s=d.size;
-      if(p.x>d.x-s/2-4&&p.x<d.x+s/2+4&&p.y>d.y-s/2-4&&p.y<d.y+s/2+4){ d.sel=!d.sel; SFX.click(); return; }
+      if(p.x>d.x-s/2-4&&p.x<d.x+s/2+4&&p.y>d.y-s/2-4&&p.y<d.y+s/2+4){
+        SFX.click();
+        if(online()) sendIntent({a:"sel", k:i}); else d.sel=!d.sel;
+        return;
+      }
     }
   }
-  if(S.phase==="resolve"){ S.resolveUntil=Math.min(S.resolveUntil, S.t+.15); }
+  if(S.phase==="resolve"){
+    if(online()){ if(myTurn()) sendIntent({a:"skip"}); }
+    else S.resolveUntil=Math.min(S.resolveUntil, S.t+.15);
+  }
 }
 function action(id){
+  // en ligne, les actions de jeu passent par le réseau (l'hôte tranche)
+  if(online()){
+    switch(id){
+      case "first": sendIntent({a:"first"}); return;
+      case "roll":  sendIntent({a:"roll"});  return;
+      case "bank":  sendIntent({a:"bank"});  return;
+      case "all":   sendIntent({a:"all"});   return;
+      case "tochest": sendIntent({a:"chest"}); return;
+      case "witch": sendIntent({a:"witch"}); return;
+      case "leave": leaveOnline(); return;
+    }
+  }
   switch(id){
     case "play": newGame(S.nAI); break;
     case "ai1": S.nAI=1; break;
     case "ai2": S.nAI=2; break;
     case "ai3": S.nAI=3; break;
     case "video": basculeVideo(); break;
+    case "online": S.phase="nick"; showNick(); break;
+    case "go": { const n=(document.getElementById("nick").value||"").trim(); hideNick(); quickPlay(n); break; }
+    case "cancel": hideNick(); leaveOnline(); break;
+    case "start": sendIntent({a:"start"}); break;
+    case "leave": leaveOnline(); break;
     case "rules": S.prev=S.phase; S.phase="rules"; break;
     case "back": S.phase=S.prev||"menu"; break;
     case "menu": S.phase="menu"; S.players=[]; S.dice=[]; break;
