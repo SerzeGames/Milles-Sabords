@@ -62,7 +62,7 @@ const FN = ["têtes de mort","diamants","pièces d'or","sabres","perroquets","si
 
 /* Cartes Pirate : l'index correspond à la position dans le spritesheet */
 const CARDS = [
- {id:"pirate", n:"Pirate",              copies:4, t:"Tous les points marqués ce tour sont doublés."},
+ {id:"pirate", n:"Pirate",              copies:4, t:"Tous les points marqués ce tour sont doublés. Sur l'Île de la Tête-de-Mort, vos adversaires perdent 200 pts par crâne au lieu de 100."},
  {id:"skull1", n:"1 tête de mort",      copies:3, t:"Vous commencez le tour avec une tête de mort."},
  {id:"skull2", n:"2 têtes de mort",     copies:2, t:"Vous commencez le tour avec deux têtes de mort."},
  {id:"diam",   n:"Diamant",             copies:4, t:"Un diamant gratuit s'ajoute au lancer : 100 pts et il compte dans les combinaisons."},
@@ -701,8 +701,9 @@ function afterRollCore(){
   if(got){ SFX.skull(); }
   const c=card(), sk=skulls();
 
-  // Île de la Tête-de-Mort : 4+ crânes au premier lancer
-  if(S.rolls===1 && c.id!=="storm" && sk>=ILE_MIN){
+  // Île de la Tête-de-Mort : 4+ crânes au premier lancer.
+  // Exceptions officielles : Naufrage et Bataille n'y vont jamais.
+  if(S.rolls===1 && c.id!=="storm" && !c.need && sk>=ILE_MIN){
     S.island=true;
     say("Île de la Tête-de-Mort ! "+sk+" têtes de mort.", C.rust);
   }
