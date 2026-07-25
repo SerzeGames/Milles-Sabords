@@ -277,8 +277,10 @@ function netSay(t){ NET.status=t; }
 
 /* --- démarrage d'une recherche de partie rapide --- */
 function quickPlay(name){
+  NET.sid = NET.sid || (Date.now().toString(36)+Math.random().toString(36).slice(2,8));
   NET.name=name||("Corsaire"+(1+ri(999)));
   NET.role="guest"; NET.status="Recherche d'une partie…"; NET.tries=0;
+  NET.searching=true; NET.established=false;   // on cherche encore un rôle
   S.phase="lobby";
   tryJoin();
 }
@@ -286,53 +288,68 @@ function tryJoin(){
   NET.tries++;
   connectFlow();
 }
+/* Vrai une fois qu'on a un rôle définitif (hôte lancé OU invité connecté) :
+   à partir de là, plus AUCUNE recherche ne doit être relancée. */
+function lockRole(){ NET.searching=false; NET.established=true; }
+/* Relance de recherche autorisée seulement si on cherche encore. */
+function retrySearch(delay){
+  setTimeout(()=>{ if(NET.searching && S.phase==="lobby") connectFlow(); }, delay);
+}
 /* Matchmaking robuste : on tente d'abord de REJOINDRE l'hôte du salon d'accueil ;
    si personne n'y répond, on tente de DEVENIR cet hôte ; en cas de collision
    (deux clients s'y essaient en même temps), le perdant re-tente de rejoindre.  */
 const LOBBY_ID = ROOM_PREFIX+"lobby";
 function connectFlow(){
-  if(S.phase!=="lobby") return;
+  if(!NET.searching || S.phase!=="lobby") return;   // rôle déjà établi → on n'ouvre rien
   netSay("Recherche d'une partie…");
-  // 1) tenter de se connecter à un hôte déjà présent
+  // 1) tenter de rejoindre un hôte déjà présent
   const probe=new Peer(null,{debug:0});
   let done=false;
   probe.on("open",()=>{
+    if(!NET.searching){ try{probe.destroy();}catch(_){}; return; }
     NET.peer=probe;
     const conn=probe.connect(LOBBY_ID,{reliable:true});
     let ouvert=false;
     const fallback=()=>{
-      if(done) return; done=true;
+      if(done || !NET.searching) return; done=true;
       try{ conn.close(); }catch(_){}
       try{ probe.destroy(); }catch(_){}
       NET.peer=null; claimHost();
     };
-    conn.on("open",()=>{ ouvert=true; done=true; NET.host=conn; conn.send({t:"name",name:NET.name}); netSay("Partie trouvée, connexion…"); });
+    conn.on("open",()=>{
+      if(!NET.searching){ try{conn.close();}catch(_){}; try{probe.destroy();}catch(_){}; return; }
+      ouvert=true; done=true; lockRole();               // invité confirmé
+      NET.host=conn; conn.send({t:"name",name:NET.name,sid:NET.sid});
+      netSay("Partie trouvée, connexion…");
+    });
     conn.on("data",d=>guestOnData(d));
     conn.on("close",()=>{ if(ouvert) guestLost(); });
-    conn.on("error",()=>{ if(!ouvert) fallback(); });   // aucun hôte à cette adresse → devenir hôte
+    conn.on("error",()=>{ if(!ouvert) fallback(); });   // pas d'hôte ici → devenir hôte
     setTimeout(fallback, 2500);                          // filet de sécurité
   });
-  probe.on("error",()=>{ if(!done){ try{probe.destroy();}catch(_){}; setTimeout(claimHost,300); } });
+  probe.on("error",()=>{ if(!done && NET.searching){ try{probe.destroy();}catch(_){}; retrySearch(300); } });
 }
 /* Essayer de réserver l'ID d'accueil pour devenir hôte. */
 function claimHost(){
-  if(S.phase!=="lobby") return;
+  if(!NET.searching || S.phase!=="lobby") return;
   netSay("Ouverture d'un salon…");
   const p=new Peer(LOBBY_ID,{debug:0});
-  p.on("open",()=>{ NET.peer=p; startHosting(p,LOBBY_ID); });
+  let devenu=false;
+  p.on("open",()=>{
+    if(!NET.searching){ try{p.destroy();}catch(_){}; return; }
+    devenu=true; lockRole();                 // hôte confirmé : plus de recherche
+    NET.peer=p; startHosting(p,LOBBY_ID);
+  });
   p.on("error",e=>{
+    if(devenu){                              // erreur APRÈS être devenu hôte : on ignore,
+      return;                                // ne JAMAIS relancer une recherche (évite l'auto-connexion)
+    }
     try{ p.destroy(); }catch(_){}
     NET.peer=null;
-    if(e.type==="unavailable-id"){
-      // quelqu'un vient de prendre la place d'hôte → on re-tente de rejoindre
-      setTimeout(()=>{ if(S.phase==="lobby") connectFlow(); }, 300+ri(400));
-    }else{
-      netSay("Connexion difficile, nouvel essai…");
-      setTimeout(()=>{ if(S.phase==="lobby") connectFlow(); }, 1000);
-    }
+    // l'ID d'accueil est déjà pris → un autre est hôte, on re-tente de le rejoindre
+    retrySearch(e.type==="unavailable-id" ? 300+ri(400) : 1000);
   });
 }
-function wireGuest(conn){ /* placeholder : câblage fait dans connectFlow */ }
 
 /* ---- côté HÔTE ---- */
 /* ---- côté HÔTE ---- */
@@ -346,7 +363,7 @@ function startHosting(peer,room){
         conn.send({t:"full"}); setTimeout(()=>{try{conn.close();}catch(_){}} ,300); return;
       }
       const seat=S.players.length;
-      S.players.push({name:"Corsaire", score:0, disp:0, ai:false, online:true, seat, conn});
+      S.players.push({name:"Corsaire", score:0, disp:0, ai:false, online:true, seat, conn, pending:true});
       NET.conns.push(conn);
       conn.send({t:"welcome", seat, you:seat});
       broadcastLobby();
@@ -385,7 +402,16 @@ function broadcastState(){
 function hostOnData(conn,d){
   const seat=hostSeatOf(conn);
   if(d.t==="name"){
-    const p=S.players.find(x=>x.conn===conn); if(p){ p.name=(""+d.name).slice(0,16)||("Corsaire"+seat); broadcastLobby(); }
+    if(d.sid && NET.sid && d.sid===NET.sid){   // c'est notre propre session : on refuse
+      const p=S.players.find(x=>x.conn===conn);
+      if(p){ S.players=S.players.filter(x=>x!==p); S.players.forEach((q,i)=>q.seat=i); }
+      NET.conns=NET.conns.filter(c=>c!==conn);
+      try{ conn.close(); }catch(_){}
+      broadcastLobby();
+      return;
+    }
+    const p=S.players.find(x=>x.conn===conn);
+    if(p){ p.name=(""+d.name).slice(0,16)||("Corsaire"+seat); p.pending=false; broadcastLobby(); }
     return;
   }
   if(d.t==="chat"){ pushChat(seat,d.m); broadcastChat(seat,d.m); return; }
@@ -415,7 +441,8 @@ function hostStart(){
 function becomeAloneHost(){
   try{ if(NET.peer) NET.peer.destroy(); }catch(_){}
   NET.peer=null; NET.host=null; NET.conns=[];
-  setTimeout(connectFlow, 300+ri(400));
+  NET.searching=true;                       // on relance une recherche propre
+  retrySearch(300+ri(400));
 }
 function guestLost(){
   if(S.phase==="over") return;
