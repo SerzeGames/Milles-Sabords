@@ -420,21 +420,47 @@ function hostOnData(conn,d){
 /* Toute intention d'un invité n'est exécutée que si c'est bien son tour. */
 function hostIntent(seat,d){
   if(S.phase==="lobby"){
-    if(d.a==="start" && seat===0){ hostStart(); }
+    if(seat!==0) return;                    // seul l'hôte gère le salon
+    if(d.a==="start"){ hostStart(); }
+    else if(d.a==="addAI"){ hostAddAI(); }
+    else if(d.a==="removeAI"){ hostRemoveAI(); }
     return;
   }
   if(seat!==S.cur) return;                 // sécurité : jamais hors de son tour
   applyIntent(d);
   broadcastState();
 }
+function aiFreeName(){
+  const pris=new Set(S.players.map(p=>p.name));
+  for(const n of AI_NAMES) if(!pris.has(n) && !pris.has(n+" (IA)")) return n;
+  return "Ordinateur "+(S.players.length);
+}
+function hostAddAI(){
+  if(S.phase!=="lobby" || S.players.length>=MAX_PLAYERS) return;
+  const seat=S.players.length;
+  S.players.push({name:aiFreeName(), score:0, disp:0, ai:true, online:false, seat});
+  broadcastLobby();
+}
+function hostRemoveAI(){
+  if(S.phase!=="lobby") return;
+  // retirer la DERNIÈRE IA ajoutée
+  for(let i=S.players.length-1;i>=1;i--){
+    if(S.players[i].ai && !S.players[i].conn){
+      S.players.splice(i,1);
+      S.players.forEach((q,j)=>{ q.seat=j; });
+      broadcastLobby();
+      return;
+    }
+  }
+}
 function hostStart(){
-  // on complète éventuellement avec des IA jusqu'à 2 joueurs minimum ? Non :
-  // la partie rapide démarre avec les humains présents (2 à 4).
+  if(S.players.length<2) return;           // au moins 2 joueurs (humains ou IA)
   buildDeck(); S.log=[]; S.lastRound=false; S.endAt=-1;
   S.players.forEach(p=>{ p.score=0; p.disp=0; });
   S.cur=S.players.length-1;
   NET.conns.forEach(c=>{ try{ c.send({t:"begin"}); }catch(_){} });
   startTurn(); broadcastState();
+  if(isHost()) scheduleHostAI();           // si le 1er tour tombe sur une IA
 }
 
 /* ---- côté INVITÉ ---- */
@@ -467,6 +493,8 @@ function guestSend(o){ if(NET.host){ try{ NET.host.send(o); }catch(_){} } }
 function sendIntent(o){
   if(isHost()){
     if(o.a==="start"){ if(S.phase==="lobby") hostStart(); return; }
+    if(o.a==="addAI"){ hostAddAI(); return; }
+    if(o.a==="removeAI"){ hostRemoveAI(); return; }
     applyIntent(o); broadcastState();
   }
   else guestSend(Object.assign({t:"intent"},o));
@@ -1218,8 +1246,15 @@ function buttons(){
     return b;
   }
   if(S.phase==="lobby"){
-    if(isHost() && (S.players.length>=2)) b.push({id:"start",l:"Démarrer la partie",k:"gold",on:true,row:0});
-    b.push({id:"cancel",l:"Quitter",k:"ghost",on:true,row:0});
+    if(isHost()){
+      b.push({id:"start",l:"Démarrer la partie",k:"gold",on:S.players.length>=2,row:0});
+      const nbIA=S.players.filter(p=>p.ai).length;
+      b.push({id:"addAI",   l:"+ Ajouter une IA", k:"green", on:S.players.length<MAX_PLAYERS, row:1});
+      b.push({id:"removeAI",l:"− Retirer une IA", k:"ghost", on:nbIA>0, row:1});
+      b.push({id:"cancel",  l:"Quitter", k:"ghost", on:true, row:1});
+    }else{
+      b.push({id:"cancel",l:"Quitter",k:"ghost",on:true,row:0});
+    }
     return b;
   }
   if(S.phase==="over"){
@@ -1607,8 +1642,8 @@ function drawLobby(){
     const fs=clamp(rh*.4,12,20);
     if(p){
       const moi = online() && p.seat===NET.seat;
-      text(p.name+(moi?" (vous)":"")+(p.ai?" — IA":""), x+18, y+rh/2, fs,
-           {col:moi?"#fff":C.parch, w:"700"});
+      text(p.name+(moi?" (vous)":"")+(p.ai?" · IA":""), x+18, y+rh/2, fs,
+           {col:moi?"#fff":(p.ai?"rgba(234,215,173,.75)":C.parch), w:"700"});
       if(p.seat===0) text("HÔTE", x+cw-16, y+rh/2, clamp(fs*.7,9,13), {col:C.brass,al:"right",w:"700",ls:1});
     }else{
       text("En attente…", x+18, y+rh/2, fs, {col:"rgba(234,215,173,.35)", w:"500"});
@@ -1616,7 +1651,7 @@ function drawLobby(){
     y+=rh+8;
   }
   const info = isHost()
-     ? (ros.length>=2 ? "Vous pouvez démarrer quand vous voulez." : "En attente d'au moins un autre joueur…")
+     ? (ros.length>=2 ? "Ajoutez des IA ou démarrez quand vous voulez." : "Ajoutez une IA ou attendez un autre joueur.")
      : "En attente que l'hôte lance la partie…";
   text(info, cx, y+rh*.3, clamp(t*.3,10,15), {col:"rgba(234,215,173,.6)",al:"center",w:"500"});
 }
@@ -1867,6 +1902,8 @@ function action(id){
     case "go": { const n=(document.getElementById("nick").value||"").trim(); hideNick(); quickPlay(n); break; }
     case "cancel": hideNick(); leaveOnline(); break;
     case "start": sendIntent({a:"start"}); break;
+    case "addAI": sendIntent({a:"addAI"}); break;
+    case "removeAI": sendIntent({a:"removeAI"}); break;
     case "leave": leaveOnline(); break;
     case "rules": S.prev=S.phase; S.phase="rules"; break;
     case "back": S.phase=S.prev||"menu"; break;
