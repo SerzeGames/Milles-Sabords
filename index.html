@@ -488,7 +488,7 @@ function snapshot(){
   return {
     phase:S.phase, cur:S.cur, card:S.card,
     flip:{mode:S.flip.mode, t:+S.flip.t.toFixed(3), dur:S.flip.dur},
-    dice:S.dice.map(d=>({f:d.face, z:d.zone, v:d.virtual?1:0, s:d.sel?1:0})),
+    dice:S.dice.map(d=>({f:d.anim?d.anim.final:d.face, z:d.zone, v:d.virtual?1:0, s:d.sel?1:0, r:d.anim?1:0})),
     rolls:S.rolls, island:S.island?1:0, witch:S.witchUsed?1:0,
     last:S.lastRound?1:0, endAt:S.endAt,
     players:S.players.map(p=>({n:p.name, sc:p.score, ai:p.ai?1:0, on:p.online?1:0, seat:p.seat})),
@@ -518,7 +518,7 @@ function applySnapshot(s){
     const o=anciens[i]||{};
     // une animation ne survit que sur un dé toujours posé sur la table
     const garde = o.anim && d.z==="table" && o.zone==="table";
-    const die={face:d.f, zone:d.z, virtual:!!d.v, sel:!!d.s,
+    const die={face:d.f, zone:d.z, virtual:!!d.v, sel:!!d.s, roll:!!d.r,
       x:o.x!==undefined?o.x:W/2, y:o.y!==undefined?o.y:H/2,
       tx:o.tx!==undefined?o.tx:W/2, ty:o.ty!==undefined?o.ty:H/2,
       size:o.size||40, rot:garde?o.rot:0, sc:garde?o.sc:1, anim:garde?o.anim:null};
@@ -539,7 +539,8 @@ function startGuestRollAnim(){
   SFX.roll();
   let i=0;
   S.dice.forEach(d=>{
-    if(d.zone==="table"){ d.anim={t:0,dur:.5,delay:(i++)*.045,final:d.face,flick:0}; }
+    // seuls les dés effectivement relancés par l'hôte tournent, et vers leur face réelle
+    if(d.roll && d.zone==="table"){ d.anim={t:0,dur:.5,delay:(i++)*.045,final:d.face,flick:0}; }
   });
 }
 
